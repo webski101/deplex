@@ -599,10 +599,54 @@ async function main() {
     let onSetKey;
     try {
       const { requireMasterKey, setSecret } = await import('./botsecrets.mjs');
+      const { isAllowedConfigKey, isValidConfigValue, ALLOWED_CONFIG_KEYS, updateEnvFile, launchDetachedApply } =
+        await import('./liveconfig.mjs');
       const masterKey = requireMasterKey(process.env);
+
       onSetKey = async ({ name, value }) => {
+        // Only names on the fixed allowlist are recognized as real Deplex
+        // config -- anything else is rejected outright rather than quietly
+        // stored as if it meant something (docs/BOT-SECRETS.md).
+        if (!isAllowedConfigKey(name)) {
+          await sendAlert(
+            cfg.telegram,
+            `❌ "${name}" is not a recognized Deplex config key -- rejected, nothing stored or applied. Allowed: ${ALLOWED_CONFIG_KEYS.join(', ')}`,
+          );
+          return;
+        }
+        if (!isValidConfigValue(value)) {
+          await sendAlert(
+            cfg.telegram,
+            `❌ "${name}": value rejected (empty, or contains a newline -- would corrupt ${cfg.liveConfig.envFilePath}'s line structure). Nothing stored or applied.`,
+          );
+          return;
+        }
+
         setSecret(cfg.botSecretsPath, masterKey, name, value);
-        await sendAlert(cfg.telegram, `Stored secret "${name}" (encrypted). Deleting the message that contained it.`);
+
+        try {
+          updateEnvFile(cfg.liveConfig.envFilePath, name, value);
+        } catch (err) {
+          await sendAlert(
+            cfg.telegram,
+            `❌ Stored "${name}" encrypted, but failed to update ${cfg.liveConfig.envFilePath}: ${err.message}. Service NOT restarted -- previous config still active.`,
+          );
+          return;
+        }
+
+        await sendAlert(cfg.telegram, `⏳ ${name} updated on disk. Restarting the service now -- I'll confirm health shortly.`);
+
+        // Handed off to a detached helper from here -- see
+        // src/liveconfig.mjs's top comment for why this process can't
+        // safely wait for and verify its own restart.
+        try {
+          await launchDetachedApply(name);
+        } catch (err) {
+          await sendAlert(
+            cfg.telegram,
+            `❌ ${name}: config updated, but failed to launch the restart/verify step (${err.message}). Run \`systemctl restart ${cfg.liveConfig.serviceName}\` manually and confirm it comes back healthy.`,
+          );
+        }
       };
     } catch (err) {
       console.error(`[telegram] /setkey disabled: ${err.message}`);

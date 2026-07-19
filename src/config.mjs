@@ -54,6 +54,20 @@ export function loadConfig(env = process.env) {
     stateFilePath: env.STATE_FILE || './deplex-state.json',
     auditLogPath: env.AUDIT_LOG_FILE || './deplex-audit.jsonl',
     botSecretsPath: env.BOT_SECRETS_FILE || './bot-secrets.enc.json',
+    // Live production config control via /setkey -- see docs/BOT-SECRETS.md.
+    // envFilePath is the systemd EnvironmentFile the running service actually
+    // reads; serviceName is restarted after a successful allowlisted update.
+    liveConfig: {
+      envFilePath: env.DEPLEX_ENV_FILE || '/root/deplex.env',
+      serviceName: env.DEPLEX_SERVICE_NAME || 'deplex',
+      healthTimeoutMs: parseIntEnv(env.DEPLEX_HEALTH_TIMEOUT_MS, 15000),
+      healthIntervalMs: parseIntEnv(env.DEPLEX_HEALTH_INTERVAL_MS, 1000),
+      // Gives the parent process's `systemd-run` invocation (see
+      // src/liveconfig.mjs's launchDetachedApply) time to safely return
+      // before the detached helper's own restart begins tearing down
+      // deplex.service's cgroup.
+      detachedStartupDelayMs: parseIntEnv(env.DEPLEX_DETACHED_STARTUP_DELAY_MS, 1500),
+    },
     policyFile: env.POLICY_FILE || './policies/default.policy',
     // Free-tier RPC plans commonly cap eth_getLogs ranges hard (10 blocks is
     // the tightest observed, on Alchemy free tier). Default under that cap;
