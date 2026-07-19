@@ -8,3 +8,8 @@ deplex-state.json
 attack/.run-count.json
 *.log
 *.legacy-bak
+
+# encrypted secrets store for the Telegram bot's /setkey command -- ciphertext
+# only (see src/botsecrets.mjs), but the whole point is it's still not meant
+# to be tracked
+bot-secrets.enc.json

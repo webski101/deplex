@@ -6,7 +6,7 @@ import { URL, pathToFileURL } from 'node:url';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { isUnlimitedAmount } from './policy.mjs';
 import { loadConfig, assertRuntimeConfig } from './config.mjs';
-import { sendAlert, startPanicListener } from './telegram.mjs';
+import { sendAlert, startBotListener } from './telegram.mjs';
 import { append as appendAudit } from './auditlog.mjs';
 
 // Well-known ERC-20/721 event topics (keccak256 of the canonical signature).
@@ -584,13 +584,32 @@ async function main() {
   };
 
   if (cfg.telegram.botToken && cfg.telegram.chatId) {
-    startPanicListener(cfg.telegram, (panicEvent) => {
+    const onPanic = (panicEvent) => {
       record(cfg, 'EVENT', panicEvent);
       emit(panicEvent).catch((err) => {
         console.error(`[responder] panic handling failed: ${err.message}`);
       });
-    }).catch((err) => {
-      console.error(`[telegram] panic listener crashed: ${err.message}`);
+    };
+
+    // Fail-closed (docs/BOT-SECRETS.md): only wire up /setkey if
+    // DEPLEX_BOT_MASTER_KEY is present and well-formed. If it's missing,
+    // requireMasterKey() throws here, onSetKey stays undefined, and
+    // telegram.mjs's dispatcher refuses to store anything it receives --
+    // the rest of the watcher (panic listener included) still starts fine.
+    let onSetKey;
+    try {
+      const { requireMasterKey, setSecret } = await import('./botsecrets.mjs');
+      const masterKey = requireMasterKey(process.env);
+      onSetKey = async ({ name, value }) => {
+        setSecret(cfg.botSecretsPath, masterKey, name, value);
+        await sendAlert(cfg.telegram, `Stored secret "${name}" (encrypted). Deleting the message that contained it.`);
+      };
+    } catch (err) {
+      console.error(`[telegram] /setkey disabled: ${err.message}`);
+    }
+
+    startBotListener(cfg.telegram, { onPanic, onSetKey }).catch((err) => {
+      console.error(`[telegram] bot listener crashed: ${err.message}`);
     });
   }
 

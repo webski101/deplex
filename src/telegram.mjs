@@ -63,8 +63,34 @@ export async function sendAlert(cfg, text) {
   });
 }
 
-export async function pollPanicCommand(cfg, onPanic, { offset = 0, timeoutSec = 30 } = {}) {
-  const updates = await apiRequest(cfg.botToken, 'getUpdates', {
+export function deleteMessage(cfg, messageId, apiRequestFn = apiRequest) {
+  return apiRequestFn(cfg.botToken, 'deleteMessage', { chat_id: cfg.chatId, message_id: messageId });
+}
+
+// Matches `/setkey <name> <value>` -- name is a single token (env-var-like:
+// letters/digits/._-), value is everything after it verbatim (a token,
+// bot secret, or anything with no leading/trailing whitespace stripped
+// beyond the message's own trim). Returns null for anything else, including
+// a bare `/setkey` with no args -- that's a usage mistake, not a secret, so
+// it's left alone (no message to delete, nothing was stored).
+const SETKEY_RE = /^\/setkey(?:@\S+)?\s+(\S+)\s+([\s\S]+)$/i;
+
+export function parseSetKeyCommand(text) {
+  const match = SETKEY_RE.exec(String(text ?? '').trim());
+  if (!match) return null;
+  return { name: match[1], value: match[2] };
+}
+
+// Single long-poll loop dispatching to both /panic and /setkey -- Telegram's
+// getUpdates rejects/interferes with two concurrent long-polls on the same
+// bot token, so this can't be two independent listeners each tracking their
+// own offset; it has to be one loop, one offset, fanning out per update.
+export async function pollBotUpdates(
+  cfg,
+  { onPanic, onSetKey } = {},
+  { offset = 0, timeoutSec = 30, apiRequestFn = apiRequest } = {},
+) {
+  const updates = await apiRequestFn(cfg.botToken, 'getUpdates', {
     offset,
     timeout: timeoutSec,
     allowed_updates: ['message'],
@@ -76,22 +102,55 @@ export async function pollPanicCommand(cfg, onPanic, { offset = 0, timeoutSec = 
     const msg = update.message;
     if (!msg || !msg.text) continue;
     const chatId = String(msg.chat?.id ?? '');
-    if (chatId !== String(cfg.chatId)) continue; // only the allowlisted chat can trigger panic
-    if (msg.text.trim().toLowerCase().startsWith('/panic')) {
-      onPanic({ type: 'panic', chatId, observedAt: new Date().toISOString() });
+    if (chatId !== String(cfg.chatId)) continue; // only the allowlisted chat can trigger anything
+    const text = msg.text.trim();
+
+    if (text.toLowerCase().startsWith('/panic')) {
+      onPanic?.({ type: 'panic', chatId, observedAt: new Date().toISOString() });
+      continue;
+    }
+
+    const setKey = parseSetKeyCommand(text);
+    if (setKey) {
+      if (onSetKey) {
+        try {
+          await onSetKey(setKey);
+        } catch (err) {
+          console.error(`[telegram] /setkey handler failed for "${setKey.name}": ${err.message}`);
+        }
+      } else {
+        // Fail-closed (docs/BOT-SECRETS.md): DEPLEX_BOT_MASTER_KEY was
+        // missing at startup, so no onSetKey handler was ever wired up --
+        // never silently fall back to storing this in plaintext. Still
+        // fall through to delete the message below: a raw secret was just
+        // typed into this chat regardless of whether we could store it.
+        console.error(
+          `[telegram] received /setkey for "${setKey.name}" but secret-handling is not armed ` +
+            '(DEPLEX_BOT_MASTER_KEY missing/invalid at startup) -- not stored.',
+        );
+      }
+      // Best-effort cleanup either way -- get the raw secret out of chat
+      // history even if it couldn't be stored.
+      try {
+        await deleteMessage(cfg, msg.message_id, apiRequestFn);
+      } catch (err) {
+        console.error(
+          `[telegram] failed to delete message ${msg.message_id} containing a raw secret -- remove it manually: ${err.message}`,
+        );
+      }
     }
   }
   return nextOffset;
 }
 
-export async function startPanicListener(cfg, onPanic) {
+export async function startBotListener(cfg, handlers) {
   let offset = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      offset = await pollPanicCommand(cfg, onPanic, { offset });
+      offset = await pollBotUpdates(cfg, handlers, { offset });
     } catch (err) {
-      console.error(`[telegram] panic listener error: ${err.message}`);
+      console.error(`[telegram] bot listener error: ${err.message}`);
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
   }

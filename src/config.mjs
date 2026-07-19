@@ -53,6 +53,7 @@ export function loadConfig(env = process.env) {
     startBlock: env.START_BLOCK ? parseIntEnv(env.START_BLOCK, null) : null,
     stateFilePath: env.STATE_FILE || './deplex-state.json',
     auditLogPath: env.AUDIT_LOG_FILE || './deplex-audit.jsonl',
+    botSecretsPath: env.BOT_SECRETS_FILE || './bot-secrets.enc.json',
     policyFile: env.POLICY_FILE || './policies/default.policy',
     // Free-tier RPC plans commonly cap eth_getLogs ranges hard (10 blocks is
     // the tightest observed, on Alchemy free tier). Default under that cap;
