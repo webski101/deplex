@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSetKeyCommand, pollBotUpdates } from '../src/telegram.mjs';
+import { parseSetKeyCommand, pollBotUpdates, isHelpCommand, buildHelpText } from '../src/telegram.mjs';
+import { ALLOWED_CONFIG_KEYS } from '../src/liveconfig.mjs';
 
 const CFG = { botToken: 'fake-token', chatId: '12345' };
 
@@ -10,6 +11,7 @@ function fakeApi(updates) {
     calls.push({ botToken, method, payload });
     if (method === 'getUpdates') return updates;
     if (method === 'deleteMessage') return { ok: true };
+    if (method === 'sendMessage') return { ok: true, message_id: 1 };
     throw new Error(`fakeApi: unexpected method ${method}`);
   };
   fn.calls = calls;
@@ -66,6 +68,45 @@ test('parseSetKeyCommand: returns null for unrelated text', () => {
   assert.equal(parseSetKeyCommand('hello there'), null);
   assert.equal(parseSetKeyCommand(''), null);
   assert.equal(parseSetKeyCommand(undefined), null);
+});
+
+// ---------------------------------------------------------------------------
+// isHelpCommand / buildHelpText
+// ---------------------------------------------------------------------------
+
+test('isHelpCommand: matches /help, case-insensitively, with or without a @botname suffix', () => {
+  assert.equal(isHelpCommand('/help'), true);
+  assert.equal(isHelpCommand('/HELP'), true);
+  assert.equal(isHelpCommand('/help@deplex_bot'), true);
+  assert.equal(isHelpCommand('  /help  '), true);
+});
+
+test('isHelpCommand: does not match unrelated text or other commands', () => {
+  assert.equal(isHelpCommand('/panic'), false);
+  assert.equal(isHelpCommand('/setkey NAME value'), false);
+  assert.equal(isHelpCommand('help'), false);
+  assert.equal(isHelpCommand(''), false);
+  assert.equal(isHelpCommand(undefined), false);
+});
+
+test('buildHelpText: lists every name in ALLOWED_CONFIG_KEYS -- fails automatically if that list ever drifts out of sync', () => {
+  const helpText = buildHelpText();
+  assert.ok(ALLOWED_CONFIG_KEYS.length > 0, 'sanity check: allowlist is not empty');
+  for (const key of ALLOWED_CONFIG_KEYS) {
+    assert.ok(helpText.includes(key), `help text is missing allowed config key "${key}"`);
+  }
+});
+
+test('buildHelpText: explains /panic and /setkey, and includes the security reminder', () => {
+  const helpText = buildHelpText();
+  assert.ok(helpText.includes('/panic'));
+  assert.ok(/EVACUATE/i.test(helpText));
+  assert.ok(/SAFE_ADDRESS/.test(helpText));
+  assert.ok(helpText.includes('/setkey'));
+  assert.ok(/encrypted/i.test(helpText));
+  assert.ok(/deleted/i.test(helpText));
+  assert.ok(/restart/i.test(helpText));
+  assert.ok(/allowlisted chat/i.test(helpText));
 });
 
 // ---------------------------------------------------------------------------
@@ -162,4 +203,26 @@ test('pollBotUpdates: passes the given offset through to getUpdates', async () =
   await pollBotUpdates(CFG, {}, { offset: 77, apiRequestFn: api });
   const getUpdatesCall = api.calls.find((c) => c.method === 'getUpdates');
   assert.equal(getUpdatesCall.payload.offset, 77);
+});
+
+test('pollBotUpdates: /help sends the help text back to the same chat, does not touch onPanic/onSetKey, and does not delete the message', async () => {
+  const api = fakeApi([msgUpdate(1, { text: '/help', message_id: 55 })]);
+  let panicked = false;
+  let setKeyCalled = false;
+  await pollBotUpdates(
+    CFG,
+    { onPanic: () => (panicked = true), onSetKey: async () => (setKeyCalled = true) },
+    { apiRequestFn: api },
+  );
+
+  assert.equal(panicked, false);
+  assert.equal(setKeyCalled, false);
+  assert.equal(api.calls.filter((c) => c.method === 'deleteMessage').length, 0);
+
+  const sendCalls = api.calls.filter((c) => c.method === 'sendMessage');
+  assert.equal(sendCalls.length, 1);
+  assert.equal(sendCalls[0].payload.chat_id, CFG.chatId);
+  for (const key of ALLOWED_CONFIG_KEYS) {
+    assert.ok(sendCalls[0].payload.text.includes(key), `sent /help text is missing "${key}"`);
+  }
 });

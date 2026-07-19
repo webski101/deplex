@@ -1,6 +1,7 @@
 // alerts + manual panic trigger
 
 import https from 'node:https';
+import { ALLOWED_CONFIG_KEYS } from './liveconfig.mjs';
 
 const API_HOST = 'api.telegram.org';
 
@@ -51,16 +52,41 @@ function apiRequest(botToken, method, payload) {
   });
 }
 
-export async function sendAlert(cfg, text) {
+export async function sendAlert(cfg, text, apiRequestFn = apiRequest) {
   if (!cfg?.botToken || !cfg?.chatId) {
     console.log(`[telegram disabled] ${text}`);
     return null;
   }
-  return apiRequest(cfg.botToken, 'sendMessage', {
+  return apiRequestFn(cfg.botToken, 'sendMessage', {
     chat_id: cfg.chatId,
     text: escapeHtml(text),
     parse_mode: 'HTML',
   });
+}
+
+const HELP_RE = /^\/help(?:@\S+)?\s*$/i;
+
+export function isHelpCommand(text) {
+  return HELP_RE.test(String(text ?? '').trim());
+}
+
+// Pulls ALLOWED_CONFIG_KEYS straight from liveconfig.mjs rather than
+// hardcoding a second copy here -- if that list ever changes, this text
+// changes with it instead of silently going stale.
+export function buildHelpText() {
+  return [
+    'Deplex bot commands:',
+    '',
+    '/panic',
+    'Triggers an emergency EVACUATE right now -- sweeps all tracked funds to SAFE_ADDRESS. Use this if you believe the wallet is actively being drained and want Deplex to act immediately, without waiting for its own detection loop.',
+    '',
+    '/setkey <NAME> <VALUE>',
+    "Securely updates a piece of Deplex's live configuration. The message containing the value is deleted automatically right after it's read, and the value is stored encrypted at rest -- but using this restarts the live service, so only send it when you actually mean to change something.",
+    '',
+    `Allowed names: ${ALLOWED_CONFIG_KEYS.join(', ')}`,
+    '',
+    'Security note: only messages from this allowlisted chat are ever acted on -- which also means anyone with access to this chat can control the live service. Treat access to this bot/chat itself like a real credential.',
+  ].join('\n');
 }
 
 export function deleteMessage(cfg, messageId, apiRequestFn = apiRequest) {
@@ -107,6 +133,15 @@ export async function pollBotUpdates(
 
     if (text.toLowerCase().startsWith('/panic')) {
       onPanic?.({ type: 'panic', chatId, observedAt: new Date().toISOString() });
+      continue;
+    }
+
+    if (isHelpCommand(text)) {
+      try {
+        await sendAlert(cfg, buildHelpText(), apiRequestFn);
+      } catch (err) {
+        console.error(`[telegram] failed to send /help reply: ${err.message}`);
+      }
       continue;
     }
 
