@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+intel-agent/.keypair.json
+deplex-state.json
+
+# local run state / logs -- not secret, just not meant to be tracked
+attack/.run-count.json
+*.log
+*.legacy-bak

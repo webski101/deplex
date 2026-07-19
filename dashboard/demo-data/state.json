@@ -1,0 +1,11 @@
+{
+  "lastScannedBlock": 11295864,
+  "seenLogKeys": [],
+  "activeApprovals": {},
+  "balances": {},
+  "incident": {
+    "stateName": "REVOKING",
+    "highestTier": 2
+  },
+  "currentIncidentId": "0607fea4-af69-4593-84f6-75ce8975d77e"
+}

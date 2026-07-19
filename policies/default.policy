@@ -1,0 +1,14 @@
+# controlled-English rules file
+#
+# Directives (uncomment and fill in per deployment):
+# WATCH WALLET 0xYourWalletAddressHere
+# SAFE ADDRESS 0xYourSafeAddressHere
+# ALLOWLIST SPENDER 0xKnownGoodSpenderAddressHere Uniswap Router
+
+RULE unlimited-approval-unknown-spender: IF approval.unlimited AND approval.spender NOT ALLOWLISTED THEN REVOKE PRIORITY 5
+
+RULE high-risk-unknown-spender: IF approval.spender NOT ALLOWLISTED AND approval.spender RISK > 70 THEN REVOKE ALL PRIORITY 7
+
+RULE large-outbound-unknown-recipient: IF transfer.out.value > 20% OF WALLET AND transfer.out.to NOT ALLOWLISTED THEN EVACUATE PRIORITY 9
+
+RULE manual-panic: IF panic.triggered THEN EVACUATE PRIORITY 10

@@ -1,0 +1,372 @@
+/* Deplex incident-room dashboard -- terminal/console aesthetic.
+   No external fonts/assets: system monospace stack only, zero dependencies,
+   consistent with the rest of this project. */
+
+:root {
+  --bg: #0a0d0a;
+  --bg-panel: #0f140f;
+  --border: #1f3d1f;
+  --border-bright: #2c5c2c;
+  --fg: #c8f0c8;
+  --fg-dim: #5a8a5a;
+  --green: #39ff6a;
+  --green-bright: #8bff9f;
+  --amber: #ffb347;
+  --red: #ff5c5c;
+  --mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Cascadia Mono', Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+body {
+  min-height: 100vh;
+  background-image:
+    repeating-linear-gradient(0deg, rgba(57, 255, 106, 0.02) 0px, rgba(57, 255, 106, 0.02) 1px, transparent 1px, transparent 3px);
+}
+
+.mono { font-family: var(--mono); }
+.dim { color: var(--fg-dim); }
+.small { font-size: 11px; }
+
+code {
+  color: var(--green-bright);
+  background: rgba(57, 255, 106, 0.08);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Top bar                                                                  */
+/* ---------------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-bright);
+  background: linear-gradient(180deg, #0d120d, #0a0d0a);
+}
+
+.brand {
+  font-size: 16px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  color: var(--green-bright);
+  text-shadow: 0 0 8px rgba(57, 255, 106, 0.35);
+}
+
+.brand-glyph {
+  color: var(--green);
+  animation: blink 1.4s steps(2, start) infinite;
+}
+
+@keyframes blink { 50% { opacity: 0.15; } }
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.badge {
+  border: 1px solid currentColor;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+.badge-pending { color: var(--fg-dim); }
+.badge-live { color: var(--green-bright); box-shadow: 0 0 6px rgba(57, 255, 106, 0.3); }
+.badge-demo { color: var(--amber); }
+
+/* ---------------------------------------------------------------------- */
+/* Grid layout                                                              */
+/* ---------------------------------------------------------------------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  grid-template-rows: auto auto auto;
+  grid-template-areas:
+    "wallet  verify"
+    "feed    timeline"
+    "policy  policy";
+  gap: 14px;
+  padding: 14px 18px 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.panel-wallet { grid-area: wallet; }
+.panel-verify { grid-area: verify; }
+.panel-feed { grid-area: feed; }
+.panel-timeline { grid-area: timeline; }
+.panel-policy { grid-area: policy; }
+
+@media (max-width: 900px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "wallet"
+      "verify"
+      "feed"
+      "timeline"
+      "policy";
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Panels                                                                   */
+/* ---------------------------------------------------------------------- */
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-title {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  color: var(--green);
+  border-bottom: 1px solid var(--border);
+  background: rgba(57, 255, 106, 0.04);
+}
+
+.panel-body {
+  padding: 12px;
+  overflow: auto;
+  flex: 1;
+}
+
+.panel-feed .panel-body,
+.panel-timeline .panel-body {
+  max-height: 420px;
+}
+
+.panel-body-split {
+  display: flex;
+  gap: 10px;
+}
+
+.incident-list {
+  flex: 0 0 44%;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  padding-right: 8px;
+}
+
+.incident-detail {
+  flex: 1;
+  overflow: auto;
+}
+
+.panel-body-split-wide {
+  display: flex;
+  gap: 14px;
+}
+
+.policy-text {
+  flex: 1.2;
+  margin: 0;
+  padding: 10px;
+  background: #080a08;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  white-space: pre-wrap;
+  max-height: 260px;
+  overflow: auto;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.policy-summary { flex: 1; overflow: auto; max-height: 260px; }
+
+/* ---------------------------------------------------------------------- */
+/* Key/value rows                                                           */
+/* ---------------------------------------------------------------------- */
+
+.kv-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.kv-key { color: var(--fg-dim); }
+.kv-val { color: var(--fg); text-align: right; }
+
+/* ---------------------------------------------------------------------- */
+/* Incident state stepper                                                   */
+/* ---------------------------------------------------------------------- */
+
+.stepper {
+  display: flex;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.step {
+  flex: 1;
+  text-align: center;
+  padding: 8px 4px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--fg-dim);
+  border-right: 1px solid var(--border);
+  background: #080a08;
+}
+
+.step:last-child { border-right: none; }
+
+.step.step-active {
+  color: #041004;
+  background: var(--green);
+  font-weight: bold;
+  text-shadow: none;
+}
+
+.step.step-passed {
+  color: var(--green-bright);
+  background: rgba(57, 255, 106, 0.08);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Live feed                                                                */
+/* ---------------------------------------------------------------------- */
+
+.feed-list { display: flex; flex-direction: column-reverse; gap: 2px; }
+
+.feed-line {
+  display: grid;
+  grid-template-columns: 90px 130px 1fr;
+  gap: 8px;
+  padding: 3px 4px;
+  border-bottom: 1px solid rgba(57, 255, 106, 0.06);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feed-line:hover { background: rgba(57, 255, 106, 0.05); }
+
+.feed-seq { color: var(--fg-dim); }
+.feed-type { color: var(--green-bright); font-weight: bold; }
+.feed-summary { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
+
+.feed-type-EXECUTION_RESULT { color: var(--green-bright); }
+.feed-type-WATCHER_ERROR { color: var(--red); }
+.feed-type-RESET { color: var(--amber); }
+.feed-type-INTEL_PURCHASE { color: #7fd4ff; }
+
+/* ---------------------------------------------------------------------- */
+/* Incident list + detail                                                   */
+/* ---------------------------------------------------------------------- */
+
+.incident-item {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.incident-item:hover { background: rgba(57, 255, 106, 0.06); }
+.incident-item.selected { background: rgba(57, 255, 106, 0.12); border-left: 3px solid var(--green); }
+
+.incident-featured { color: var(--amber); }
+
+.incident-id { color: var(--fg-dim); font-size: 10px; }
+
+.trail-record {
+  border-left: 2px solid var(--border-bright);
+  padding: 4px 0 4px 10px;
+  margin-bottom: 8px;
+}
+
+.trail-type { color: var(--green-bright); font-weight: bold; margin-right: 8px; }
+.trail-ts { color: var(--fg-dim); font-size: 11px; }
+.trail-detail { font-size: 12px; margin-top: 2px; }
+
+a { color: #7fd4ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------------- */
+/* Chain verify                                                            */
+/* ---------------------------------------------------------------------- */
+
+.verify-result {
+  margin: 10px 0;
+  padding: 12px;
+  border-radius: 3px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  border: 1px solid var(--border);
+}
+
+.verify-pending { color: var(--fg-dim); background: #080a08; }
+.verify-running { color: var(--amber); background: rgba(255, 179, 71, 0.08); border-color: var(--amber); }
+.verify-valid { color: var(--green-bright); background: rgba(57, 255, 106, 0.1); border-color: var(--green); text-shadow: 0 0 6px rgba(57,255,106,0.4); }
+.verify-broken { color: var(--red); background: rgba(255, 92, 92, 0.1); border-color: var(--red); }
+
+.btn-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+.btn {
+  font-family: var(--mono);
+  background: #0d150d;
+  color: var(--green-bright);
+  border: 1px solid var(--border-bright);
+  border-radius: 3px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+.btn:hover:not(:disabled) { background: rgba(57, 255, 106, 0.12); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-danger { color: var(--amber); border-color: var(--amber); }
+.btn-danger:hover:not(:disabled) { background: rgba(255, 179, 71, 0.12); }
+.btn-ghost { color: var(--fg-dim); }
+
+/* ---------------------------------------------------------------------- */
+/* Policy summary table                                                     */
+/* ---------------------------------------------------------------------- */
+
+.policy-rule {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+  font-size: 12px;
+}
+
+.policy-rule-name { color: var(--green-bright); font-weight: bold; }
+.policy-rule-meta { color: var(--fg-dim); font-size: 11px; margin-top: 2px; }
+
+/* ---------------------------------------------------------------------- */
+/* Footer                                                                   */
+/* ---------------------------------------------------------------------- */
+
+.footer {
+  text-align: center;
+  padding: 14px;
+  border-top: 1px solid var(--border);
+}

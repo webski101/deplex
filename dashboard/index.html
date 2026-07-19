@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DEPLEX // INCIDENT ROOM</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-glyph">&gt;</span> DEPLEX <span class="dim">// INCIDENT ROOM</span>
+    </div>
+    <div class="topbar-right">
+      <span id="mode-badge" class="badge badge-pending">MODE: --</span>
+      <span id="clock" class="dim"></span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- WALLET STATUS -->
+    <section class="panel panel-wallet" aria-labelledby="wallet-title">
+      <h2 id="wallet-title" class="panel-title">01 // WALLET STATUS</h2>
+      <div class="panel-body">
+        <div class="kv-row"><span class="kv-key">watched wallet</span><span id="w-address" class="kv-val mono">--</span></div>
+        <div class="kv-row"><span class="kv-key">enforcement</span><span id="w-enforcement" class="kv-val">--</span></div>
+        <div class="kv-row"><span class="kv-key">last scanned block</span><span id="w-block" class="kv-val mono">--</span></div>
+        <div class="kv-row"><span class="kv-key">active approvals</span><span id="w-approvals" class="kv-val mono">--</span></div>
+        <div class="kv-row"><span class="kv-key">current incident</span><span id="w-incident-id" class="kv-val mono">--</span></div>
+
+        <div class="stepper" id="stepper" role="list" aria-label="incident state machine"></div>
+      </div>
+    </section>
+
+    <!-- CHAIN VERIFY -->
+    <section class="panel panel-verify" aria-labelledby="verify-title">
+      <h2 id="verify-title" class="panel-title">04 // CHAIN VERIFY</h2>
+      <div class="panel-body">
+        <p class="dim small">Client-side SHA-256 hash-chain walk, via WebCrypto (<code>crypto.subtle</code>) — the exact same <code>verifyChain()</code> Node uses server-side, imported verbatim.</p>
+        <div id="verify-result" class="verify-result verify-pending">NOT YET RUN</div>
+        <div id="verify-meta" class="dim small"></div>
+        <div class="btn-row">
+          <button id="btn-verify" class="btn">RUN VERIFICATION</button>
+          <button id="btn-tamper" class="btn btn-danger">SIMULATE TAMPERING</button>
+          <button id="btn-untamper" class="btn btn-ghost" disabled>RESTORE</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- LIVE AUDIT FEED -->
+    <section class="panel panel-feed" aria-labelledby="feed-title">
+      <h2 id="feed-title" class="panel-title">02 // LIVE AUDIT FEED <span id="feed-count" class="dim small"></span></h2>
+      <div class="panel-body">
+        <div id="feed-list" class="feed-list" role="log" aria-live="off"></div>
+      </div>
+    </section>
+
+    <!-- INCIDENT TIMELINE -->
+    <section class="panel panel-timeline" aria-labelledby="timeline-title">
+      <h2 id="timeline-title" class="panel-title">03 // INCIDENT TIMELINE</h2>
+      <div class="panel-body panel-body-split">
+        <div id="incident-list" class="incident-list"></div>
+        <div id="incident-detail" class="incident-detail">
+          <p class="dim small">Select an incident to view its full decision → execution trail.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- POLICY VIEW -->
+    <section class="panel panel-policy" aria-labelledby="policy-title">
+      <h2 id="policy-title" class="panel-title">05 // POLICY (READ-ONLY)</h2>
+      <div class="panel-body panel-body-split-wide">
+        <pre id="policy-text" class="policy-text mono"></pre>
+        <div id="policy-summary" class="policy-summary"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer dim small">
+    Deplex — onchain incident-response agent. Data source: <span id="footer-source">--</span>.
+  </footer>
+
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>
