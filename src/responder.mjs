@@ -326,6 +326,26 @@ async function runTier(ctx, incidentId, tier, event, ruleName) {
 
   if (tier === 3) {
     await ctx.alert(formatEvacuateAlert(incidentId, outcome));
+    // A successful EVACUATE is the terminal action -- there's nowhere higher
+    // to escalate to, and the wallet's tracked balances have just been swept
+    // to the safe address, so there's nothing left for a human to review
+    // before it's safe to re-arm. Previously nothing ever called this
+    // (resolveCurrentIncident/resetCurrentIncident were both operator-only,
+    // via scripts/reset-incident.mjs), so ctx.walletState.currentIncidentId
+    // stayed set forever after the FIRST successful EVACUATE -- every
+    // subsequent trigger (a fresh /panic hours later, or a genuinely new
+    // auto-detected event) silently reattached to that same stale id
+    // instead of minting a new one. Confirmed live: three separate manual
+    // /panic triggers hours apart all produced "Evacuation complete for
+    // incident <same-id>". See docs/FAILURE-MODES.md.
+    //
+    // Deliberately scoped to SUCCESS only: a failed EVACUATE still needs a
+    // human to look at it before anything re-arms (unchanged, and still
+    // covered by the "stale escalated incident" regression test below,
+    // which simulates exactly that stuck-open state).
+    if (outcome.success) {
+      resolveCurrentIncident(ctx);
+    }
   }
 
   return outcome;

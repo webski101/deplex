@@ -226,6 +226,7 @@ test('idempotency is fail-closed: a FAILED prior attempt does not block the retr
   const first = await handleEvent({ type: 'panic' }, ctx);
   assert.equal(first.outcome.success, false);
   assert.equal(kh.calls.transfers.length, 1);
+  assert.equal(walletState.currentIncidentId, first.incidentId, 'a failed EVACUATE must stay open, not auto-resolve');
 
   // retry with transfers now healthy, simulating a restart (fresh ctx,
   // completedKeys re-derived from the on-disk audit chain): the failed
@@ -236,11 +237,49 @@ test('idempotency is fail-closed: a FAILED prior attempt does not block the retr
 
   assert.equal(kh.calls.transfers.length, 2, 'failed attempt must be retryable');
   assert.equal(second.outcome.success, true);
+  assert.equal(second.incidentId, first.incidentId, 'retry of the same still-open incident keeps the same id');
+});
 
-  // and a third run now skips: the succeeded leg IS recorded as completed
-  const { ctx: ctx3 } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState });
-  await handleEvent({ type: 'panic' }, ctx3);
-  assert.equal(kh.calls.transfers.length, 2, 'succeeded attempt must not re-execute');
+test('idempotency within a still-open incident: a partial EVACUATE failure retries only the failed leg, not the already-succeeded one', async () => {
+  // A fully successful EVACUATE now auto-resolves the incident (see the
+  // "auto-resolve on success" fix in responder.mjs's runTier), so the only
+  // way an EVACUATE stays open long enough to retry is a PARTIAL failure --
+  // one leg succeeds, another fails, overall outcome.success stays false.
+  // TOKEN_A succeeds on the first attempt; TOKEN_B fails until toggled off.
+  const calls = { transfers: [] };
+  let execCounter = 0;
+  let failTokenB = true;
+  const kh = {
+    async executeTransfer(client, payload) {
+      calls.transfers.push(payload);
+      if (payload.token === TOKEN_B && failTokenB) throw new Error('mock: TOKEN_B transfer rejected');
+      return { executionId: `exec-${++execCounter}`, status: 'submitted' };
+    },
+    async pollExecution(client, executionId) {
+      return { status: 'confirmed', txHash: `0xhash-${executionId}`, executionId };
+    },
+  };
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A, TOKEN_B] });
+  const walletState = {};
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '1000', [TOKEN_B]: '2000' }, nativeBalance: '0' });
+  const { ctx } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState });
+
+  const first = await handleEvent({ type: 'panic' }, ctx);
+  assert.equal(first.outcome.success, false, 'TOKEN_B leg failed -> overall EVACUATE is not successful');
+  assert.equal(calls.transfers.length, 2);
+  assert.equal(walletState.currentIncidentId, first.incidentId, 'a failed EVACUATE must not auto-resolve -- stays open for retry');
+
+  // retry (simulated restart: fresh ctx, completedKeys re-derived from the
+  // on-disk audit chain, same persisted walletState/incident id)
+  failTokenB = false;
+  const { ctx: ctx2 } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState });
+  const second = await handleEvent({ type: 'panic' }, ctx2);
+
+  assert.equal(second.incidentId, first.incidentId, 'retry of a still-open incident keeps the same id');
+  assert.equal(second.outcome.success, true);
+  assert.equal(calls.transfers.length, 3, 'only the previously-failed TOKEN_B leg re-executes');
+  assert.equal(calls.transfers[2].token, TOKEN_B);
+  assert.equal(walletState.currentIncidentId, null, 'now that EVACUATE fully succeeded, the incident auto-resolves');
 });
 
 // ---------------------------------------------------------------------------
@@ -282,9 +321,14 @@ test('escalation: a failed REVOKE auto-escalates tier by tier and alerts at each
   assert.equal(nativeLeg.amount, '777');
   assert.equal(nativeLeg.to, SAFE);
 
-  // incident state machine ended at EVACUATING
-  assert.equal(walletState.incident.stateName, 'EVACUATING');
-  assert.equal(walletState.incident.highestTier, 3);
+  // incident auto-resolves: EVACUATE succeeded, nothing higher to escalate
+  // to and nothing left to review before it's safe to re-arm (see the
+  // auto-resolve-on-success fix in runTier -- this used to assert
+  // stateName stayed 'EVACUATING' forever, which was the actual production
+  // bug: a resolved incident's id got reattached to the next trigger).
+  assert.equal(walletState.incident.stateName, 'RESOLVED');
+  assert.equal(walletState.incident.highestTier, -1);
+  assert.equal(walletState.currentIncidentId, null);
 });
 
 test('EVACUATE failure has no higher tier: alerts once with a clear failure message and stops (no infinite recursion)', async () => {
@@ -483,6 +527,48 @@ test('incident id persists across events in one incident and clears on resolve',
   const third = await handleEvent(approvalEvent({ token: TOKEN_C, txHash: '0xevent3' }), ctx);
   assert.notEqual(third.incidentId, first.incidentId, 'post-resolve events start a fresh incident');
   assert.equal(walletState.incident.stateName, 'REVOKING', 'fresh incident advances normally after RESOLVED');
+});
+
+test('two separate /panic triggers, with a successful EVACUATE resolving in between, produce two distinct incident ids (regression: three real panics hours apart all reused the same id)', async () => {
+  // Confirmed live: three separate manual /panic commands sent hours apart
+  // all produced "Evacuation complete for incident <same-id>" every time.
+  // Root cause -- nothing ever called resolveCurrentIncident()/
+  // resetCurrentIncident() after a successful EVACUATE (both were operator-
+  // only, via scripts/reset-incident.mjs), so walletState.currentIncidentId
+  // stayed set forever after the FIRST successful EVACUATE, and every
+  // subsequent handleEvent() call (line ~366: `if (!currentIncidentId)`)
+  // saw it already set and reattached to it instead of minting a fresh one.
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
+  const walletState = {};
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '5000' }, nativeBalance: '0' });
+
+  // First /panic -- own KeeperHubClient/ctx per trigger, same as a real
+  // watcher process handling two /panic commands hours apart would use the
+  // same long-lived ctx but genuinely separate handleEvent() invocations.
+  const { ctx: ctx1 } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState });
+  const first = await handleEvent({ type: 'panic', observedAt: '2026-07-20T07:57:00.000Z' }, ctx1);
+
+  assert.equal(first.outcome.success, true, 'setup: the first EVACUATE must succeed for this scenario');
+  assert.equal(walletState.currentIncidentId, null, 'a successful EVACUATE auto-resolves -- no operator action required');
+  assert.equal(walletState.incident.stateName, 'RESOLVED');
+
+  // Second /panic, hours later -- same persisted walletState (as a real
+  // restart-surviving watcher process would have), no manual reset run.
+  const { ctx: ctx2 } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState });
+  const second = await handleEvent({ type: 'panic', observedAt: '2026-07-20T08:04:00.000Z' }, ctx2);
+
+  assert.equal(second.outcome.success, true);
+  assert.notEqual(second.incidentId, first.incidentId, 'a genuinely separate manual panic must mint a fresh incident id');
+
+  // Third /panic, for good measure -- matches the exact reported scenario
+  // (three triggers, all distinct).
+  const { ctx: ctx3 } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState });
+  const third = await handleEvent({ type: 'panic', observedAt: '2026-07-20T08:09:00.000Z' }, ctx3);
+
+  assert.equal(third.outcome.success, true);
+  assert.notEqual(third.incidentId, first.incidentId);
+  assert.notEqual(third.incidentId, second.incidentId);
 });
 
 test('no rule matched -> nothing executed, but the null verdict is still recorded as a DECISION', async () => {

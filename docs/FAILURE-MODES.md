@@ -180,6 +180,52 @@ successful `EVACUATE` gets the exact same completion alert `/panic` does.
 `test/telegram.test.mjs` covers the dispatcher actually awaiting `onPanic` and not crashing the
 poll loop if it throws.
 
+### A resolved incident's id, silently reattached to the next unrelated trigger (fixed)
+
+**What happened:** three separate manual `/panic` commands, sent hours apart, all produced
+`"Evacuation complete for incident <same-id>"` — the identical incident id every time, even
+though each was a genuinely distinct manual override with no relationship to the others.
+
+**Root cause.** `handleEvent()`'s incident-id assignment (`if
+(!ctx.walletState.currentIncidentId) { ctx.walletState.currentIncidentId = randomUUID(); }`) only
+mints a fresh id when none is currently set — correct in isolation, but nothing ever cleared
+`currentIncidentId` after a successful `EVACUATE`. `resolveCurrentIncident()`/
+`resetCurrentIncident()` both existed and both worked correctly (already covered by an existing
+test), but were **operator-only**, reachable solely via `scripts/reset-incident.mjs` — a script a
+human has to remember to run by hand. In production, nobody did, between any of the three real
+panics. So `currentIncidentId` stayed set from the very first successful `EVACUATE` onward, and
+every later trigger — another `/panic`, or in principle a genuinely new auto-detected event —
+silently reattached to that stale id instead of starting its own.
+
+This wasn't unique to `/panic` either, in the same sense the notification gap above wasn't:
+`runTier()`'s tier-3 branch is the one shared completion point for `EVACUATE`, regardless of
+which path reached it, and it never resolved the incident on success for either one.
+
+**Fix, at the shared root cause, scoped deliberately to success only.** `runTier()` now calls
+`resolveCurrentIncident(ctx)` immediately after a **successful** `EVACUATE` — same shared
+tier-3 completion point the alert fix above already lives at, so both `/panic` and a real
+auto-escalated incident get it. Deliberately *not* extended to a failed `EVACUATE`: an incident
+that reached tier 3 and failed still needs a human to look at it before anything re-arms, which
+is exactly what the existing "stale escalated incident... operator reset re-arms them" regression
+test protects (that test's setup — an incident stuck at `EVACUATING` with no resolution — remains
+a valid, still-open scenario; this fix never touches it, since it only fires on `outcome.success
+=== true`).
+
+**A subtlety this surfaced in the existing test suite:** two prior tests asserted the *old*
+behavior as if it were correct — one expected `walletState.incident.stateName` to stay
+`'EVACUATING'` forever after a fully successful cascade (updated to expect `'RESOLVED'`), and one
+used three sequential `/panic` calls to test that a succeeded leg isn't re-executed on retry
+(that scenario no longer arises for a *fully* successful `EVACUATE`, since it now auto-resolves
+immediately — replaced with a partial-failure scenario, one leg succeeds and another fails so the
+overall outcome stays unsuccessful and the incident correctly stays open, which is the only way
+this idempotency path can still be reached).
+
+**Tests:** `test/responder.test.mjs` — a new regression test drives three separate `/panic`
+triggers against the same persisted `walletState` (no manual reset in between, matching the real
+production sequence) and asserts all three get distinct incident ids; a new partial-EVACUATE-
+failure test confirms idempotency still holds for a genuinely still-open incident; the existing
+"stale escalated incident" suppression test is unchanged and still passes.
+
 ---
 
 ## Execution safety
