@@ -445,6 +445,85 @@ Findings where the thing at risk was whether Deplex's own claim about what happe
 verdict, a settled payment, a valid chain — was actually trustworthy, independent of whether the
 underlying action itself was correct.
 
+### A concurrent-writer seq collision broke the live audit chain (fixed) — found by the test suite against real, messy production data, not synthetic fixtures
+
+**What happened:** `test/auditlog.test.mjs`'s fixture test against the real, live
+`deplex-audit.jsonl` failed: `seq mismatch: expected 7530, found 7529`. This is exactly why that
+test exists against real data instead of only synthetic records — a hand-built fixture would
+never have produced this specific failure mode, because it can only happen from two independent
+processes racing, not from anything a single test author would think to construct by hand.
+
+**Confirmed root cause, from the code, not inference:** `src/auditlog.mjs`'s `append()` cached
+`{seq, hash}` of the last-written record in a **per-process, in-memory `Map`**, seeded once via
+`loadTail()` reading the file's last line the first time that process appended, and never
+re-validated against the file afterward. That's correct *within* one process (JavaScript is
+single-threaded — a process cannot race itself), but the systemd watcher and a manually-run
+`attack/run-demo.mjs` are **two genuinely independent OS processes**, and both default to the
+exact same `deplex-audit.jsonl` path (`AUDIT_LOG_FILE` unset in either). Each held its own stale
+view of "the last record." The moment their two appends happened close enough together in time —
+both having last read the same true tail — both computed the same "next seq," and both wrote it:
+one legitimate record at the correct position, and a second, different record immediately after
+it, **also claiming the same seq number**, with a `prevHash` pointing at the same predecessor
+rather than at the record that actually preceded it in the file. `verifyChain()` checks `seq`
+first (see `auditchain.mjs`), so that's the failure it reports; the `prevHash` link is broken at
+the same spot too, one check later. Everything after that point in the file was, and remains,
+unverified — `verifyChain()` stops at the first break, by design (see `auditchain.mjs`'s
+`brokenAt` semantics), so nothing later in the log has actually been checked yet either way.
+
+This wasn't a rare edge case requiring bad luck — it's the deterministic, guaranteed-eventually
+outcome of two processes appending to one file with zero cross-process coordination, and
+`attack/run-demo.mjs`'s own file header explicitly documents that it's *meant* to run alongside
+the watcher, not instead of it. The bug wasn't running the attack demo; the bug was `append()`
+having no way to know another process existed.
+
+**Fix, at the actual root cause, not a workaround:** `append()` now acquires a dependency-free
+advisory lock (`<path>.lock`, created via `fs.openSync(path, 'wx')` — atomic exclusive-create,
+fails with `EEXIST` if another process holds it, with a bounded retry and a stale-lock timeout in
+case a process crashes mid-append while holding it) around the entire read-tail-then-write
+critical section, and **always re-reads the true tail from disk while holding the lock** rather
+than trusting any cache. The per-process in-memory cache is gone entirely — there is no longer
+anything to go stale. `migrateFile()` (used by both the legacy migration and the repair below)
+takes the same lock, since a full-file rewrite racing an in-flight append could otherwise
+silently lose that append's write. The lock is synchronous by design (a busy-wait spin, not an
+async wait) — `append()` is called from the hot, synchronous path throughout this codebase and
+making it async would ripple into every call site; contention is expected to be rare and hold
+time is always a single line's read-then-write, never seconds.
+
+**Proof the fix actually holds, not just "no error was thrown":** a same-process test cannot
+reproduce this bug at all (JS can't race itself), so `test/auditlog.test.mjs` gained a test that
+spawns real, independent OS child processes (`test/fixtures/concurrent-append-worker.mjs`, 4
+processes × 15 appends each, launched together so they genuinely overlap in wall-clock time)
+against one shared log path, then asserts the result is dense (`0..N-1`, no gaps, no duplicates)
+and verifies end to end. It does — genuine multi-process lock contention was observed (the test
+takes ~350ms for what would be near-instant single-process appends, confirming processes actually
+serialized through the lock rather than racing past each other undetected).
+
+**Repair of the actual corrupted file — done transparently, not silently patched.**
+`scripts/repair-audit-chain.mjs` is a new, dedicated tool (distinct from `migrate-audit.mjs`,
+which only upgrades a pre-Phase-4 *unchained* log and only *verifies* an already-chained one
+without fixing it): it re-derives a consistent chain from the broken file's **current, unmodified
+file order** — preserving every record's original `ts`/`type`/`payload` verbatim, including both
+halves of the colliding pair — and only recomputes `seq`/`prevHash`/`hash` to match physical
+position. Nothing is dropped, nothing is invented, nothing is reordered; the tool prints the
+records immediately around the break point before touching anything, and permanently keeps the
+broken original at `<path>.pre-repair-bak`. Verified against a hand-constructed file reproducing
+the exact `"seq mismatch: expected 3, found 2"` shape of the real failure: repair succeeds, the
+result verifies end to end, and all 6 original records (including the synthetic duplicate) are
+present afterward with their original payloads intact. This tool is explicitly **not** the right
+one for a chain broken by genuine tampering (an altered payload or forged hash) — rechaining
+would silently "heal" a tampered record instead of flagging it, so it must only be used once the
+cause is confirmed to be structural/ordering, as it was confirmed to be here.
+
+**Status as of this writing:** the fix and repair tool are built and tested against synthetic
+reproductions of the exact failure; the live production `deplex-audit.jsonl` on the VPS has not
+yet been repaired (that requires running `scripts/repair-audit-chain.mjs` against the real file,
+which only exists there) — see the operator walkthrough for pulling direct evidence of the exact
+break and applying the repair.
+
+**Tests:** `test/auditlog.test.mjs` — the new multi-process concurrent-append test described
+above; all pre-existing tamper/gap/reorder/migration tests pass unchanged, since none of them
+depended on the removed cache's behavior.
+
 ### A reverted drain is not, by itself, proof Deplex won (fixed)
 
 **What happened:** `attack/run-demo.mjs` was requesting `transferFrom(..., MAX_UINT256)` for

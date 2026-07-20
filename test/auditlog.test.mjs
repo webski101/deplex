@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, copyFileS
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import {
   append,
   readAll,
@@ -11,13 +12,13 @@ import {
   migrateFile,
   rechainRecords,
   nodeDigestHex,
-  _resetTailCache,
   GENESIS_PREV_HASH,
 } from '../src/auditlog.mjs';
 import { verifyChain, webCryptoDigestHex, recordPreimage } from '../src/auditchain.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REAL_LOG = join(__dirname, '..', 'deplex-audit.jsonl');
+const CONCURRENT_WORKER = join(__dirname, 'fixtures', 'concurrent-append-worker.mjs');
 
 let tmpDir;
 let logPath;
@@ -25,7 +26,6 @@ let logPath;
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'deplex-audit-'));
   logPath = join(tmpDir, 'audit.jsonl');
-  _resetTailCache();
 });
 
 afterEach(() => {
@@ -64,9 +64,12 @@ test('append preserves type and payload intact (readAll consumers still see them
   assert.deepEqual(r.payload, { status: 'confirmed', txHash: '0xabc' });
 });
 
-test('a fresh process (cold cache) resumes the chain from the persisted tail without breaking it', async () => {
+test('a fresh process resumes the chain from the persisted tail without breaking it', async () => {
   appendMany(logPath, 3);
-  _resetTailCache(); // simulate a restart: in-memory tail is gone
+  // append() always reads the tail fresh from disk (no in-memory cache to
+  // go stale across a restart -- see the concurrent-writer fix), so this is
+  // just a direct append against the same path, same as a real process
+  // restarting would do.
   const resumed = append(logPath, 'EVENT', { afterRestart: true });
   assert.equal(resumed.seq, 3, 'seq must continue from the persisted tail, not reset to 0');
   const { valid, brokenAt } = await verify(logPath, nodeDigestHex);
@@ -177,6 +180,49 @@ test('rapid sequential appends yield a densely-ordered, valid chain (no interlea
 });
 
 // ---------------------------------------------------------------------------
+// Concurrent writers -- regression for the real production incident
+// (docs/FAILURE-MODES.md: the systemd watcher and a manually-run
+// attack/run-demo.mjs both appended to the same default deplex-audit.jsonl
+// path as genuinely independent OS processes, producing a duplicate seq
+// and a permanently broken chain). A same-process test cannot reproduce
+// this -- JS's single-threaded execution already prevents a process from
+// racing itself -- so this spawns real child processes.
+// ---------------------------------------------------------------------------
+
+test('multiple independent OS processes appending to the same log never collide on seq -- the chain stays dense and valid', async () => {
+  const WORKERS = 4;
+  const PER_WORKER = 15;
+
+  function runWorker() {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [CONCURRENT_WORKER, logPath, String(PER_WORKER)]);
+      let stderr = '';
+      child.stderr.on('data', (d) => (stderr += d));
+      child.on('error', reject);
+      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}: ${stderr}`))));
+    });
+  }
+
+  // Launched together (not awaited one at a time) so their appends actually
+  // overlap in real time, the same way the watcher and a manually-run
+  // attack demo genuinely do.
+  await Promise.all(Array.from({ length: WORKERS }, runWorker));
+
+  const records = readAll(logPath);
+  assert.equal(records.length, WORKERS * PER_WORKER, 'no write lost, none duplicated');
+
+  const seqs = records.map((r) => r.seq).sort((a, b) => a - b);
+  assert.deepEqual(
+    seqs,
+    Array.from({ length: WORKERS * PER_WORKER }, (_, i) => i),
+    'seq must be dense 0..N-1 with no gaps or duplicates across processes',
+  );
+
+  const { valid, brokenAt, reason } = await verify(logPath, nodeDigestHex);
+  assert.equal(valid, true, `chain must verify after concurrent multi-process writes (broke at ${brokenAt}: ${reason})`);
+});
+
+// ---------------------------------------------------------------------------
 // Migration of the legacy (pre-Phase-4) format
 // ---------------------------------------------------------------------------
 
@@ -207,7 +253,6 @@ test('migrateFile upgrades a legacy log file in place and the result verifies', 
   const { valid } = await verify(logPath, nodeDigestHex);
   assert.equal(valid, true);
   // and appends continue the chain cleanly post-migration
-  _resetTailCache();
   const next = append(logPath, 'RESET', { kind: 'operator_reset' });
   assert.equal(next.seq, 2);
   assert.equal((await verify(logPath, nodeDigestHex)).valid, true);
@@ -215,7 +260,6 @@ test('migrateFile upgrades a legacy log file in place and the result verifies', 
 
 test('appending to a legacy (unchained) log throws instead of silently corrupting the chain', () => {
   writeFileSync(logPath, JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', type: 'EVENT', payload: {} }) + '\n');
-  _resetTailCache();
   assert.throws(() => append(logPath, 'EVENT', {}), /unchained format|migrate/);
 });
 
