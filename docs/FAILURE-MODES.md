@@ -364,6 +364,59 @@ event `watcher.mjs` detects on its next cycle. If it clears the `large-outbound-
 threshold, that triggers `EVACUATE` — damage control, not prevention; whatever the drainer
 already took in that first transfer is gone.
 
+### `REVOKE_ALL` working through an unrelated stale backlog before reaching the real threat (fixed) — and the failsafe that caught it anyway
+
+**What happened:** a real revocation landed 8 blocks after detection instead of near-instantly.
+The `DECISION` record fired in the same millisecond as detection — the delay wasn't in
+detection or decision, it was in execution. `REVOKE_ALL` (tier 2) iterated through **four
+stale, unrelated approval entries** left over from repeated morning testing before ever
+reaching the actual current attacker's spender, which happened to be fifth in
+`Object.values(activeApprovals)`'s iteration order. One of the four stale entries alone timed
+out after 20 seconds against KeeperHub. Total time from detection to the real attacker's
+revoke: **~70 seconds** — not a close race lost by a few seconds, but a real threat queued
+dead last behind housekeeping.
+
+**Root cause — two compounding gaps, both in how `activeApprovals` is maintained, not in
+detection or decision:**
+1. **No pruning on Deplex's own successful action.** `runRevoke()` never touched
+   `walletState.activeApprovals` — the only thing that ever removed an entry was
+   `watcher.mjs`'s own independent log-scanning loop noticing a *new* on-chain `Approval` event
+   with `amount === '0'` on some *later* poll cycle (the on-chain effect of Deplex's own
+   revoke, re-discovered from scratch rather than known directly). Correct in principle (the
+   on-chain event is the real source of truth, not Deplex's own claim of success), but it means
+   every successful revoke leaves its tracked entry sitting in state until the watcher happens
+   to re-observe it — and under rapid repeated demo/testing, new approvals get planted faster
+   than that observation loop drains old ones, so the backlog only grows.
+2. **`REVOKE_ALL` had no concept of "the current threat" at all.** It iterated
+   `Object.values(activeApprovals)` in whatever order the object happened to hold them —
+   insertion order, with no relationship to which entry actually triggered this incident. A
+   stale backlog and the real attacker were treated identically: just entries in a list.
+
+**Fix, addressing both:**
+- `runRevoke()` now deletes its own `activeApprovals` entry immediately on confirmed success
+  (including an idempotent "already done" skip) — an immediate in-memory prune, layered on top
+  of (not replacing) the watcher's independent on-chain re-scan, which remains the durable
+  source of truth. A crash between the prune and the next state save just means the watcher's
+  own scan re-confirms it later, same as before this fix — no new gap introduced either way.
+- `REVOKE_ALL` (`runRevokeAll`) now receives the triggering event and moves the entry matching
+  its `token`/`spender` to the front of the queue before iterating. The real, current threat no
+  longer queues behind unrelated backlog, regardless of how large that backlog has grown.
+
+**The genuinely good part, worth stating plainly rather than only as a bug report:** even with
+the real threat queued dead last and one stale entry burning a full 20-second timeout, the
+accumulated delay itself triggered a real auto-escalation to `EVACUATE` (the tier-2 REVOKE_ALL
+batch's failure/timeout pushed the incident to tier 3), which completed successfully. The
+failsafe caught the slow path exactly as designed — this is a resilience story about the
+escalation cascade, not just a bug about queue ordering. The fix above means it shouldn't need
+to lean on that failsafe for this specific cause going forward, but it's worth knowing the
+layer beneath the fix also held.
+
+**Tests:** `test/responder.test.mjs` — `REVOKE_ALL` prioritizes the triggering spender ahead of
+a 2-entry unrelated backlog (and a companion test confirming no reordering happens when the
+trigger isn't tracked at all); `activeApprovals` prunes immediately on success and is left
+alone on failure, both for a single tier-1 `REVOKE` and within a `REVOKE_ALL` batch with mixed
+outcomes.
+
 ### A wallet Deplex can detect into but not defend: KeeperHub's custody model
 
 **What we assumed going in:** point Deplex at any watched wallet address, and KeeperHub's

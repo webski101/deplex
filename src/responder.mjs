@@ -177,10 +177,11 @@ function revokeAbiFor(kind) {
 
 async function runRevoke(ctx, incidentId, { token, spender, kind }) {
   const { fragment, buildArgs } = revokeAbiFor(kind);
-  return performExecution(ctx, {
+  const key = `${token}:${spender}`;
+  const result = await performExecution(ctx, {
     incidentId,
     actionType: 'REVOKE',
-    target: { key: `${token}:${spender}`, token, spender, kind: kind ?? 'erc20' },
+    target: { key, token, spender, kind: kind ?? 'erc20' },
     execute: (kh, idempotencyKey) =>
       kh.executeContractCall(ctx.client, {
         chain: ctx.cfg.chainId,
@@ -190,14 +191,46 @@ async function runRevoke(ctx, incidentId, { token, spender, kind }) {
         idempotencyKey,
       }),
   });
+  // Prune immediately on confirmed success (including an idempotent
+  // "already done" skip) rather than waiting for src/watcher.mjs's own
+  // independent on-chain re-scan to notice the resulting zero-approval
+  // event on some later poll cycle. Confirmed live: without this, repeated
+  // testing accumulated a backlog of stale-but-still-tracked entries that
+  // REVOKE_ALL kept re-attempting on every later incident, one of which
+  // timed out after 20s -- see docs/FAILURE-MODES.md. This is an immediate,
+  // in-memory prune; the watcher's log-driven prune is still the durable
+  // source of truth and keeps running independently regardless, so a crash
+  // between this line and the next state save just means the watcher's own
+  // scan re-confirms it later, not a silent gap either way.
+  if (result.success && ctx.walletState.activeApprovals) {
+    delete ctx.walletState.activeApprovals[key];
+  }
+  return result;
 }
 
 // Sequential on purpose -- spec calls out nonce sanity, not throughput.
 // Continues past individual failures; escalation to EVACUATE (if any leg
 // failed) happens once in runTier(), after the whole batch is done, so
 // legs that would have succeeded still get their chance.
-async function runRevokeAll(ctx, incidentId) {
+//
+// `event` (the trigger that actually escalated to this tier) is prioritized
+// to the front of the queue when present. Confirmed live: an accumulated
+// backlog of unrelated stale approvals made a real attacker's revoke land
+// ~70s after detection instead of immediately -- REVOKE_ALL worked through
+// four irrelevant entries sequentially (one of which alone timed out after
+// 20s) before ever reaching the actual current threat, which happened to be
+// last in object-key iteration order. The real, current threat must never
+// queue behind unrelated backlog.
+async function runRevokeAll(ctx, incidentId, event) {
   const entries = Object.values(ctx.walletState.activeApprovals ?? {});
+  if (event?.token && event?.spender) {
+    const triggerKey = `${event.token}:${event.spender}`.toLowerCase();
+    const idx = entries.findIndex((e) => `${e.token}:${e.spender}`.toLowerCase() === triggerKey);
+    if (idx > 0) {
+      const [triggering] = entries.splice(idx, 1);
+      entries.unshift(triggering);
+    }
+  }
   const results = [];
   for (const entry of entries) {
     results.push(await runRevoke(ctx, incidentId, entry));
@@ -310,7 +343,7 @@ async function runTier(ctx, incidentId, tier, event, ruleName) {
   let outcome;
   if (tier === 0) outcome = await runAlert(ctx, incidentId, event, ruleName);
   else if (tier === 1) outcome = await runRevoke(ctx, incidentId, { token: event.token, spender: event.spender, kind: event.kind });
-  else if (tier === 2) outcome = await runRevokeAll(ctx, incidentId);
+  else if (tier === 2) outcome = await runRevokeAll(ctx, incidentId, event);
   else outcome = await runEvacuate(ctx, incidentId);
 
   if (!outcome.success && tier < 3) {

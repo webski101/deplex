@@ -456,6 +456,113 @@ test('REVOKE ALL: iterates approvals sequentially, continues past individual fai
   assert.equal(byToken[TOKEN_C], 'confirmed');
 });
 
+test('REVOKE ALL: prioritizes the triggering event\'s spender first, ahead of unrelated backlog (regression: real attacker queued last behind 4 stale entries)', async () => {
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg({ trackedTokens: [] });
+  // TOKEN_C is the real, current threat -- deliberately last in object-key
+  // iteration order, matching the live incident (the actual attacker ended
+  // up 5th in line behind 4 unrelated stale entries).
+  const walletState = {
+    activeApprovals: {
+      [`${TOKEN_A}:${SPENDER}`]: { token: TOKEN_A, spender: SPENDER, kind: 'erc20' },
+      [`${TOKEN_B}:${SPENDER}`]: { token: TOKEN_B, spender: SPENDER, kind: 'erc20' },
+      [`${TOKEN_C}:${SPENDER}`]: { token: TOKEN_C, spender: SPENDER, kind: 'erc20' },
+    },
+  };
+  const rpc = makeMockRpc();
+  const policy = 'RULE r2: IF approval.unlimited THEN REVOKE ALL PRIORITY 7';
+  const { ctx } = makeCtx({ policy, cfg, keeperhub: kh, rpc, walletState });
+
+  await handleEvent(approvalEvent({ token: TOKEN_C, txHash: '0xcurrent-attacker' }), ctx);
+
+  assert.deepEqual(
+    kh.calls.contractCalls.map((c) => c.to),
+    [TOKEN_C, TOKEN_A, TOKEN_B],
+    'the triggering token must be revoked first, unrelated backlog follows',
+  );
+});
+
+test('REVOKE ALL: does not reorder anything when the triggering spender is not in the tracked backlog', async () => {
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg({ trackedTokens: [] });
+  const walletState = {
+    activeApprovals: {
+      [`${TOKEN_A}:${SPENDER}`]: { token: TOKEN_A, spender: SPENDER, kind: 'erc20' },
+      [`${TOKEN_B}:${SPENDER}`]: { token: TOKEN_B, spender: SPENDER, kind: 'erc20' },
+    },
+  };
+  const rpc = makeMockRpc();
+  const policy = 'RULE r2: IF approval.unlimited THEN REVOKE ALL PRIORITY 7';
+  const { ctx } = makeCtx({ policy, cfg, keeperhub: kh, rpc, walletState });
+
+  // triggering event's token (TOKEN_C) isn't one of the tracked entries
+  await handleEvent(approvalEvent({ token: TOKEN_C, txHash: '0xunrelated' }), ctx);
+
+  assert.deepEqual(kh.calls.contractCalls.map((c) => c.to), [TOKEN_A, TOKEN_B]);
+});
+
+test('activeApprovals is pruned immediately on a successful REVOKE, not left for the watcher to notice later', async () => {
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg();
+  const walletState = {
+    activeApprovals: {
+      [`${TOKEN_A}:${SPENDER}`]: { token: TOKEN_A, spender: SPENDER, kind: 'erc20', unlimited: true },
+    },
+  };
+  const { ctx } = makeCtx({ policy: REVOKE_POLICY, cfg, keeperhub: kh, walletState });
+
+  const result = await handleEvent(approvalEvent(), ctx);
+
+  assert.equal(result.outcome.success, true);
+  assert.equal(
+    walletState.activeApprovals[`${TOKEN_A}:${SPENDER}`],
+    undefined,
+    'a successfully revoked entry must be removed immediately, in-memory',
+  );
+});
+
+test('activeApprovals keeps a FAILED revoke\'s entry -- only success prunes it', async () => {
+  const kh = makeMockKeeperhub();
+  kh.failContractCallFor = () => true;
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
+  const walletState = {
+    activeApprovals: {
+      [`${TOKEN_A}:${SPENDER}`]: { token: TOKEN_A, spender: SPENDER, kind: 'erc20', unlimited: true },
+    },
+  };
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '0' }, nativeBalance: '0' });
+  const { ctx } = makeCtx({ policy: REVOKE_POLICY, cfg, keeperhub: kh, rpc, walletState });
+
+  await handleEvent(approvalEvent(), ctx);
+
+  assert.ok(
+    walletState.activeApprovals[`${TOKEN_A}:${SPENDER}`],
+    'a failed revoke must not be pruned -- it still needs a retry/escalation',
+  );
+});
+
+test('REVOKE ALL: prunes each successfully revoked entry as it goes, keeps the one that failed', async () => {
+  const kh = makeMockKeeperhub();
+  kh.failContractCallFor = (payload) => payload.to === TOKEN_B;
+  const cfg = makeCfg({ trackedTokens: [] });
+  const walletState = {
+    activeApprovals: {
+      [`${TOKEN_A}:${SPENDER}`]: { token: TOKEN_A, spender: SPENDER, kind: 'erc20' },
+      [`${TOKEN_B}:${SPENDER}`]: { token: TOKEN_B, spender: SPENDER, kind: 'erc20' },
+      [`${TOKEN_C}:${SPENDER}`]: { token: TOKEN_C, spender: SPENDER, kind: 'erc20' },
+    },
+  };
+  const rpc = makeMockRpc();
+  const policy = 'RULE r2: IF approval.unlimited THEN REVOKE ALL PRIORITY 7';
+  const { ctx } = makeCtx({ policy, cfg, keeperhub: kh, rpc, walletState });
+
+  await handleEvent(approvalEvent(), ctx);
+
+  assert.equal(walletState.activeApprovals[`${TOKEN_A}:${SPENDER}`], undefined, 'A succeeded -- pruned');
+  assert.ok(walletState.activeApprovals[`${TOKEN_B}:${SPENDER}`], 'B failed -- kept');
+  assert.equal(walletState.activeApprovals[`${TOKEN_C}:${SPENDER}`], undefined, 'C succeeded -- pruned');
+});
+
 // ---------------------------------------------------------------------------
 // Panic -> EVACUATE, and incident lifecycle
 // ---------------------------------------------------------------------------
