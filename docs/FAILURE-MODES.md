@@ -137,6 +137,49 @@ confirmed to fail against the reverted guard (reproducing the exact `stdout=""` 
 against the fix, not just trusted by inspection. The same fix was applied to
 `scripts/dashboard-server.mjs` correctly from the start in Phase 7, rather than reintroduced.
 
+### A panic button with no confirmation of anything, in either direction (fixed)
+
+**What happened:** `/panic` correctly triggered `EVACUATE` on the backend — funds moved, the
+audit chain recorded it accurately — but the operator who sent the command got back nothing.
+No acknowledgment that it was received, no confirmation once the evacuation actually completed
+or failed. From the Telegram side this is indistinguishable from the bot being dead, which is
+the worst possible failure mode for a manual last-resort override specifically meant for the
+moment automated detection isn't trusted: it looks broken even when it worked.
+
+**Root cause, and why it wasn't unique to `/panic`.** The instinct was to assume `/panic`'s
+handler in `src/watcher.mjs` had simply forgotten to send a message, the way an ordinary bug
+would. Checking whether a real, automatically-detected incident escalating to `EVACUATE` had
+the same gap ruled that out: it did too. `src/responder.mjs`'s `runTier()` cascade never called
+`ctx.alert()` on a *successful* `REVOKE`/`REVOKE_ALL`/`EVACUATE` at any tier, for either trigger
+path — the only existing alert calls were tier 0's `ALERT` action (which *is* the alert, by
+definition), the "auto-escalating to tier N+1" message on a failed lower tier, and a `CRITICAL`
+message on `EVACUATE` failing with nowhere higher to escalate to. `/panic` didn't skip a step
+the automatic path had; the shared pipeline both paths funnel through had simply never been
+given a completion-notification step, because until a human command was wired directly into it,
+nothing was actively waiting on a response from it.
+
+**Fix, at the shared root cause, not per-caller.** `runTier()`'s tier-3 branch now always calls
+`ctx.alert()` with the `EVACUATE` outcome — success or failure — via a new
+`formatEvacuateAlert()` helper, so both `/panic` and a real incident that escalates up to
+`EVACUATE` get it identically, from one code path. On success: the real tx hash(es) and a
+Sepolia explorer link per leg (or an explicit "nothing found to move" if all tracked balances
+were already zero — never a fabricated hash). On failure: the actual per-leg error, not a vague
+"something went wrong." Separately, `/panic` specifically also gained its own immediate interim
+acknowledgment (`🚨 Panic received — evacuating funds now.`, sent from `src/watcher.mjs`'s
+`onPanic` before `EVACUATE` is kicked off) — that one *is* legitimately `/panic`-specific, since
+it's confirming a human command was heard, not reporting an execution outcome a background
+detection loop has no one waiting on. `src/telegram.mjs`'s dispatcher now `await`s `onPanic` (it
+previously fired it and moved on without waiting), the same shape already used for `/setkey`,
+so a thrown error in the handler is caught and logged instead of silently dropped.
+
+**Tests:** `test/responder.test.mjs` covers `formatEvacuateAlert` directly — single-leg success
+with the real tx hash and explorer link, multi-leg success listing every hash, the
+nothing-to-evacuate case, failure with the real per-leg error, and — the point-3 check —
+confirming a real auto-detected incident escalating through failed `REVOKE`/`REVOKE_ALL` into a
+successful `EVACUATE` gets the exact same completion alert `/panic` does.
+`test/telegram.test.mjs` covers the dispatcher actually awaiting `onPanic` and not crashing the
+poll loop if it throws.
+
 ---
 
 ## Execution safety
@@ -482,7 +525,7 @@ onward: when a guess turns out wrong, say so and show the evidence that overturn
 than quietly rewriting history to look right in hindsight.
 
 **Tally, for what it's worth:** across every phase, real failures found and fixed break down as
-roughly six in detection/execution reliability, four in verification integrity, one confirmed
+roughly seven in detection/execution reliability, four in verification integrity, one confirmed
 third-party characteristic (not fixed, because there was nothing in this codebase to fix), and
 two KeeperHub-API documentation gaps that cost live failures before `docs/ONBOARDING-TEARDOWN.md`
 turned them into a documented convention. None were caught by code review alone; all were caught

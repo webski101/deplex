@@ -129,6 +129,39 @@ test('pollBotUpdates: /panic dispatches to onPanic, not onSetKey, and does not d
   assert.equal(api.calls.filter((c) => c.method === 'deleteMessage').length, 0);
 });
 
+test('pollBotUpdates: awaits onPanic (same pattern as onSetKey) rather than firing it and moving on', async () => {
+  const api = fakeApi([msgUpdate(1, { text: '/panic' })]);
+  const order = [];
+  await pollBotUpdates(
+    CFG,
+    {
+      onPanic: async () => {
+        order.push('panic-start');
+        await Promise.resolve();
+        order.push('panic-end');
+      },
+    },
+    { apiRequestFn: api },
+  );
+  order.push('poll-returned');
+  assert.deepEqual(order, ['panic-start', 'panic-end', 'poll-returned']);
+});
+
+test('pollBotUpdates: an onPanic handler that throws does not crash the poll', async () => {
+  const api = fakeApi([msgUpdate(1, { text: '/panic' })]);
+  await assert.doesNotReject(
+    pollBotUpdates(
+      CFG,
+      {
+        onPanic: async () => {
+          throw new Error('watcher exploded');
+        },
+      },
+      { apiRequestFn: api },
+    ),
+  );
+});
+
 test('pollBotUpdates: /setkey dispatches to onSetKey with {name, value} and deletes the original message', async () => {
   const api = fakeApi([msgUpdate(5, { text: '/setkey BOT_TOKEN abc123', message_id: 999 })]);
   let received = null;

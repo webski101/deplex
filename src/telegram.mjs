@@ -132,7 +132,13 @@ export async function pollBotUpdates(
     const text = msg.text.trim();
 
     if (text.toLowerCase().startsWith('/panic')) {
-      onPanic?.({ type: 'panic', chatId, observedAt: new Date().toISOString() });
+      if (onPanic) {
+        try {
+          await onPanic({ type: 'panic', chatId, observedAt: new Date().toISOString() });
+        } catch (err) {
+          console.error(`[telegram] /panic handler failed: ${err.message}`);
+        }
+      }
       continue;
     }
 

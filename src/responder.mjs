@@ -263,10 +263,45 @@ async function runEvacuate(ctx, incidentId) {
   return { success: !anyFailed, results };
 }
 
+const SEPOLIA_EXPLORER_TX = 'https://sepolia.etherscan.io/tx/';
+
+// EVACUATE's outcome was previously only ever reported to Telegram on
+// failure (see git history) -- REVOKE/REVOKE_ALL/EVACUATE all had NO
+// success notification at any tier, for either a real auto-detected
+// incident or a manually triggered /panic, because nothing in this
+// cascade ever called ctx.alert() on a successful execution. /panic didn't
+// uniquely skip anything; it just happened to be the first place a human
+// was actively waiting on a response from this generic pipeline. Fixed
+// here, at the shared tier-3 completion point, so both trigger paths get
+// it -- not duplicated per-caller (see src/watcher.mjs's onPanic for the
+// separate, /panic-specific "command received" acknowledgment, which is a
+// different message with a different purpose).
+function formatEvacuateAlert(incidentId, outcome) {
+  const results = outcome.results ?? [];
+
+  if (!outcome.success) {
+    const failed = results.filter((r) => !r.success);
+    const reason = failed.length ? failed.map((r) => `${r.key}: ${r.error ?? 'unknown error'}`).join('; ') : 'unknown error';
+    return `❌ Evacuation failed: ${reason}. Manual intervention may be required.`;
+  }
+
+  const succeeded = results.filter((r) => r.success && r.result?.txHash);
+  if (succeeded.length === 0) {
+    return `✅ Evacuation complete for incident ${incidentId} -- no funds found to move (all tracked balances were already zero).`;
+  }
+  if (succeeded.length === 1) {
+    const txHash = succeeded[0].result.txHash;
+    return `✅ Evacuation complete. TxHash: ${txHash}. Explorer: ${SEPOLIA_EXPLORER_TX}${txHash}`;
+  }
+  const legs = succeeded.map((r) => `${r.result.txHash} (${SEPOLIA_EXPLORER_TX}${r.result.txHash})`).join(', ');
+  return `✅ Evacuation complete (${succeeded.length} transfers). TxHashes: ${legs}`;
+}
+
 // ---------------------------------------------------------------------------
 // Cascade: run the tier the incident just escalated to; on failure at any
-// tier below EVACUATE, auto-escalate one tier and retry there. EVACUATE
-// failing has nowhere higher to go -- alert critically instead.
+// tier below EVACUATE, auto-escalate one tier and retry there. EVACUATE has
+// nowhere higher to go -- its outcome (success or failure) is always
+// reported directly instead.
 // ---------------------------------------------------------------------------
 
 async function runTier(ctx, incidentId, tier, event, ruleName) {
@@ -289,10 +324,8 @@ async function runTier(ctx, incidentId, tier, event, ruleName) {
     return runTier(ctx, incidentId, tier + 1, event, ruleName);
   }
 
-  if (!outcome.success && tier === 3) {
-    await ctx.alert(
-      `Deplex CRITICAL: EVACUATE failed for incident ${incidentId} -- no higher tier available, manual intervention required`,
-    );
+  if (tier === 3) {
+    await ctx.alert(formatEvacuateAlert(incidentId, outcome));
   }
 
   return outcome;

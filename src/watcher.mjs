@@ -584,8 +584,22 @@ async function main() {
   };
 
   if (cfg.telegram.botToken && cfg.telegram.chatId) {
-    const onPanic = (panicEvent) => {
+    // Two-message pattern, same shape as /setkey: an immediate interim ack
+    // (EVACUATE can take several seconds -- this confirms the command was
+    // actually heard) followed by a final outcome message once
+    // EXECUTION_RESULT is known. The final message is sent from
+    // responder.mjs's runTier() (see formatEvacuateAlert()), not here --
+    // that's the shared completion point for EVACUATE regardless of
+    // whether it was reached via /panic or a real auto-detected incident
+    // escalating up to tier 3, so fixing it there fixes both paths, not
+    // just this one.
+    const onPanic = async (panicEvent) => {
       record(cfg, 'EVENT', panicEvent);
+      try {
+        await sendAlert(cfg.telegram, '🚨 Panic received — evacuating funds now.');
+      } catch (err) {
+        console.error(`[telegram] failed to send panic acknowledgment: ${err.message}`);
+      }
       emit(panicEvent).catch((err) => {
         console.error(`[responder] panic handling failed: ${err.message}`);
       });

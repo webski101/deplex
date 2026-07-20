@@ -287,7 +287,7 @@ test('escalation: a failed REVOKE auto-escalates tier by tier and alerts at each
   assert.equal(walletState.incident.highestTier, 3);
 });
 
-test('EVACUATE failure has no higher tier: alerts CRITICAL and stops (no infinite recursion)', async () => {
+test('EVACUATE failure has no higher tier: alerts once with a clear failure message and stops (no infinite recursion)', async () => {
   const kh = makeMockKeeperhub();
   kh.failTransfers = true;
   const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
@@ -297,7 +297,85 @@ test('EVACUATE failure has no higher tier: alerts CRITICAL and stops (no infinit
   const result = await handleEvent({ type: 'panic', observedAt: 'now' }, ctx);
 
   assert.equal(result.outcome.success, false);
-  assert.equal(alerts.filter((a) => a.includes('CRITICAL')).length, 1);
+  const evacAlerts = alerts.filter((a) => a.startsWith('❌ Evacuation failed'));
+  assert.equal(evacAlerts.length, 1, 'exactly one failure alert, not zero and not a duplicate per leg');
+  assert.match(evacAlerts[0], /manual intervention may be required/i);
+  assert.match(evacAlerts[0], /mock: transfer rejected/); // the actual underlying error, not a vague message
+});
+
+// ---------------------------------------------------------------------------
+// EVACUATE completion notification -- both directions, both trigger paths
+// (manual /panic and an escalated auto-detected incident go through the
+// exact same runTier() tier-3 branch, so one set of tests here covers both)
+// ---------------------------------------------------------------------------
+
+test('EVACUATE success (single leg): sends exactly one alert with the real txHash and an explorer link', async () => {
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '1000' }, nativeBalance: '0' });
+  const { ctx, alerts } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState: {} });
+
+  const result = await handleEvent({ type: 'panic' }, ctx);
+
+  assert.equal(result.outcome.success, true);
+  const successAlerts = alerts.filter((a) => a.startsWith('✅ Evacuation complete'));
+  assert.equal(successAlerts.length, 1);
+  assert.match(successAlerts[0], /TxHash: 0xhash-exec-1\b/);
+  assert.match(successAlerts[0], /https:\/\/sepolia\.etherscan\.io\/tx\/0xhash-exec-1/);
+});
+
+test('EVACUATE success (multiple legs, e.g. a token plus native): lists every txHash, not just the first', async () => {
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '1000' }, nativeBalance: '42' });
+  const { ctx, alerts } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState: {} });
+
+  await handleEvent({ type: 'panic' }, ctx);
+
+  const successAlerts = alerts.filter((a) => a.startsWith('✅ Evacuation complete'));
+  assert.equal(successAlerts.length, 1);
+  assert.match(successAlerts[0], /2 transfers/);
+  assert.match(successAlerts[0], /0xhash-exec-1/);
+  assert.match(successAlerts[0], /0xhash-exec-2/);
+});
+
+test('EVACUATE success with nothing to move: says so plainly instead of fabricating a txHash', async () => {
+  const kh = makeMockKeeperhub();
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '0' }, nativeBalance: '0' });
+  const { ctx, alerts } = makeCtx({ policy: PANIC_POLICY, cfg, keeperhub: kh, rpc, walletState: {} });
+
+  const result = await handleEvent({ type: 'panic' }, ctx);
+
+  assert.equal(result.outcome.success, true);
+  assert.equal(kh.calls.transfers.length, 0);
+  const successAlerts = alerts.filter((a) => a.startsWith('✅ Evacuation complete'));
+  assert.equal(successAlerts.length, 1);
+  assert.match(successAlerts[0], /no funds found to move/);
+  assert.doesNotMatch(successAlerts[0], /TxHash/);
+});
+
+test('EVACUATE success reached via escalation (real auto-detected incident, not /panic) also gets the completion alert', async () => {
+  // This is the point-3 check: the automatic-detection path goes through
+  // the exact same runTier() tier-3 branch as /panic, so it must get the
+  // same completion notification -- confirming the fix is at the shared
+  // root cause, not a /panic-only patch.
+  const kh = makeMockKeeperhub();
+  kh.failContractCallFor = () => true; // tier 1 and tier 2 both fail -> escalates to tier 3
+  const cfg = makeCfg({ trackedTokens: [TOKEN_A] });
+  const walletState = {
+    activeApprovals: {
+      [`${TOKEN_A}:${SPENDER}`]: { token: TOKEN_A, spender: SPENDER, kind: 'erc20', unlimited: true },
+    },
+  };
+  const rpc = makeMockRpc({ tokenBalances: { [TOKEN_A]: '5000' }, nativeBalance: '0' });
+  const { ctx, alerts } = makeCtx({ policy: REVOKE_POLICY, cfg, keeperhub: kh, rpc, walletState });
+
+  const result = await handleEvent(approvalEvent(), ctx);
+
+  assert.equal(result.outcome.success, true);
+  const successAlerts = alerts.filter((a) => a.startsWith('✅ Evacuation complete'));
+  assert.equal(successAlerts.length, 1, 'a real detected incident escalating to EVACUATE must also get a completion alert');
 });
 
 // ---------------------------------------------------------------------------
