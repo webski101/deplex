@@ -51,33 +51,41 @@ console.log('  signer:  whichever wallet integration is connected to this API ke
 
 const client = new KeeperHubClient(cfg.keeperHub);
 
-const submitted = await executeContractCall(client, {
-  chain: cfg.chainId,
-  to: WETH_SEPOLIA,
-  abiFragment: APPROVE_ABI,
-  args: [ATTACKER_ADDRESS, MAX_UINT256],
-  idempotencyKey: `plant-approval:${WETH_SEPOLIA}:${ATTACKER_ADDRESS}`,
-});
+let exitCode = 0;
+try {
+  const submitted = await executeContractCall(client, {
+    chain: cfg.chainId,
+    to: WETH_SEPOLIA,
+    abiFragment: APPROVE_ABI,
+    args: [ATTACKER_ADDRESS, MAX_UINT256],
+    idempotencyKey: `plant-approval:${WETH_SEPOLIA}:${ATTACKER_ADDRESS}`,
+  });
 
-console.log('Submitted:', JSON.stringify(submitted, null, 2));
+  console.log('Submitted:', JSON.stringify(submitted, null, 2));
 
-if (!submitted.executionId) {
-  console.log('\nNo execution id returned -- treating the submit response as final.');
-  process.exit(submitted.txHash ? 0 : 1);
+  if (!submitted.executionId) {
+    console.log('\nNo execution id returned -- treating the submit response as final.');
+    exitCode = submitted.txHash ? 0 : 1;
+  } else {
+    console.log(`\nPolling execution ${submitted.executionId} ...`);
+    const final = await pollExecution(client, submitted.executionId, {
+      intervalMs: cfg.keeperHub.pollIntervalMs,
+      timeoutMs: cfg.keeperHub.pollTimeoutMs,
+    });
+
+    console.log('\nFinal result:', JSON.stringify(final, null, 2));
+    if (final.txHash) {
+      console.log(`\nExplorer: ${final.explorerUrl || `https://sepolia.etherscan.io/tx/${final.txHash}`}`);
+      console.log('\nApproval planted. Next: point WATCHED_WALLET at the KeeperHub wallet and restart the watcher.');
+    } else {
+      console.error('\nFAILED -- no txHash in final result. Do not proceed to re-arming until this succeeds.');
+      exitCode = 1;
+    }
+  }
+} finally {
+  // Every run of this one-shot script previously left its MCP session open
+  // server-side forever -- see docs/KEEPERHUB-NOTES.md's session-
+  // accumulation entry.
+  await client.closeSession();
 }
-
-console.log(`\nPolling execution ${submitted.executionId} ...`);
-const final = await pollExecution(client, submitted.executionId, {
-  intervalMs: cfg.keeperHub.pollIntervalMs,
-  timeoutMs: cfg.keeperHub.pollTimeoutMs,
-});
-
-console.log('\nFinal result:', JSON.stringify(final, null, 2));
-if (final.txHash) {
-  console.log(`\nExplorer: ${final.explorerUrl || `https://sepolia.etherscan.io/tx/${final.txHash}`}`);
-  console.log('\nApproval planted. Next: point WATCHED_WALLET at the KeeperHub wallet and restart the watcher.');
-  process.exit(0);
-} else {
-  console.error('\nFAILED -- no txHash in final result. Do not proceed to re-arming until this succeeds.');
-  process.exit(1);
-}
+process.exit(exitCode);

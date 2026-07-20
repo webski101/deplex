@@ -144,6 +144,100 @@ test('parallel callers awaiting ensureSession share one in-flight initialize', a
 });
 
 // ---------------------------------------------------------------------------
+// closeSession -- session-accumulation fix (see docs/KEEPERHUB-NOTES.md)
+// ---------------------------------------------------------------------------
+
+test('closeSession is a no-op when no session was ever established', async () => {
+  const client = new KeeperHubClient({ apiKey: 'k', mcpUrl: 'http://127.0.0.1:1/mcp' });
+  await client.closeSession(); // must not throw or attempt any request
+  assert.equal(client.sessionId, null);
+});
+
+test('closeSession sends a DELETE with the session id and auth header, then clears sessionId locally', async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push({ method: req.method, sessionHeader: req.headers['mcp-session-id'], auth: req.headers['authorization'] });
+    res.writeHead(200);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const client = new KeeperHubClient({ apiKey: 'kh_test', mcpUrl: `http://127.0.0.1:${port}/mcp` });
+  client.sessionId = 'sess-to-close';
+
+  await client.closeSession();
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, 'DELETE');
+  assert.equal(seen[0].sessionHeader, 'sess-to-close');
+  assert.equal(seen[0].auth, 'Bearer kh_test');
+  assert.equal(client.sessionId, null, 'sessionId must be cleared locally regardless of the response');
+
+  await closeServer(server);
+});
+
+test('closeSession treats a 405 (server does not support client-initiated termination) as success, per the MCP spec', async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(405);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const client = new KeeperHubClient({ apiKey: 'k', mcpUrl: `http://127.0.0.1:${port}/mcp` });
+  client.sessionId = 'sess-1';
+
+  await assert.doesNotReject(() => client.closeSession());
+  assert.equal(client.sessionId, null);
+
+  await closeServer(server);
+});
+
+test('closeSession never throws even if the request itself fails (best-effort cleanup, never masks the caller\'s real result)', async () => {
+  // Nothing listening on this port -- connect fails fast with ECONNREFUSED.
+  const client = new KeeperHubClient({ apiKey: 'k', mcpUrl: 'http://127.0.0.1:1/mcp' });
+  client.sessionId = 'sess-1';
+  await assert.doesNotReject(() => client.closeSession());
+  assert.equal(client.sessionId, null);
+});
+
+// ---------------------------------------------------------------------------
+// Debug-mode request timing (added after two unexplained 20s timeouts in one
+// night with no latency data to compare against -- see
+// docs/KEEPERHUB-NOTES.md's session-accumulation entry)
+// ---------------------------------------------------------------------------
+
+test('debug mode logs a timing line per request', async () => {
+  const { server, url } = await startMockServer(withHandshake((parsed) => ok(parsed, { tools: [] })));
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    const client = new KeeperHubClient({ apiKey: 'k', mcpUrl: url, debug: true });
+    await client.listTools();
+  } finally {
+    console.error = originalError;
+  }
+  const timingLines = logged.filter((l) => l.includes('[keeperhub debug]') && /\d+ms/.test(l));
+  assert.ok(timingLines.length >= 2, `expected a timing line for both initialize and tools/list, got: ${JSON.stringify(logged)}`);
+  await closeServer(server);
+});
+
+test('debug mode off (the default): no timing lines logged', async () => {
+  const { server, url } = await startMockServer(withHandshake((parsed) => ok(parsed, { tools: [] })));
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    const client = new KeeperHubClient({ apiKey: 'k', mcpUrl: url });
+    await client.listTools();
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(logged.filter((l) => l.includes('[keeperhub debug]')).length, 0);
+  await closeServer(server);
+});
+
+// ---------------------------------------------------------------------------
 // callTool response unwrapping
 // ---------------------------------------------------------------------------
 

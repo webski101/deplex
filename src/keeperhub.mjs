@@ -99,6 +99,7 @@ export class KeeperHubClient {
     if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
 
     const transport = url.protocol === 'http:' ? http : https;
+    const startedAt = Date.now();
     const { statusCode, responseHeaders, data } = await new Promise((resolve, reject) => {
       const req = transport.request(url, { method: 'POST', headers }, (res) => {
         let chunks = '';
@@ -121,6 +122,16 @@ export class KeeperHubClient {
       req.write(body);
       req.end();
     });
+    // Logged only under DEPLEX_DEBUG_KEEPERHUB=1 -- if a call is slow rather
+    // than truly hung, this is the difference between "it took 19.8s" and
+    // "it never responded at all," which a bare timeout error can't tell
+    // you (destroy() fires at the same instant either way). See
+    // docs/KEEPERHUB-NOTES.md's session-accumulation entry for why this was
+    // added: two 20s timeouts in one night with no prior latency data to
+    // compare against made "is this getting progressively slower" unanswerable.
+    if (this.debug) {
+      console.error(`[keeperhub debug] ${method}: ${Date.now() - startedAt}ms (session: ${this.sessionId ? 'existing' : 'new'})`);
+    }
 
     const returnedSessionId = responseHeaders['mcp-session-id'];
     if (returnedSessionId) this.sessionId = returnedSessionId;
@@ -179,6 +190,44 @@ export class KeeperHubClient {
       clientInfo: CLIENT_INFO,
     });
     await this.rpcRequest('notifications/initialized', {}, { isNotification: true });
+  }
+
+  // Best-effort session termination. Per the MCP Streamable HTTP spec, a
+  // client that's done with a session SHOULD send DELETE with
+  // Mcp-Session-Id so the server can free whatever it's tracking for it;
+  // the server MAY reply 405 if it doesn't support client-initiated
+  // termination -- that's a normal, expected outcome here, not a failure.
+  // This client previously never called this at all: every one-shot script
+  // (attack/run-demo.mjs, scripts/dump-tools.mjs, scripts/investigate-
+  // wallet.mjs, scripts/plant-approval.mjs) created a fresh session on
+  // every single invocation and simply exited, leaving it open server-side
+  // indefinitely -- see docs/KEEPERHUB-NOTES.md's "session accumulation"
+  // entry for the live investigation this came out of. Never throws: a
+  // failure here must never mask the actual result of whatever the caller
+  // was doing.
+  async closeSession() {
+    if (!this.sessionId) return;
+    const sessionId = this.sessionId;
+    this.sessionId = null;
+    try {
+      const url = new URL(this.mcpUrl);
+      const transport = url.protocol === 'http:' ? http : https;
+      await new Promise((resolve, reject) => {
+        const req = transport.request(
+          url,
+          { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiKey}`, 'Mcp-Session-Id': sessionId } },
+          (res) => {
+            res.resume(); // body (if any) is irrelevant -- 200 or a spec-legal 405 either way
+            res.on('end', resolve);
+          },
+        );
+        req.on('error', reject);
+        req.setTimeout(5000, () => req.destroy(new Error('session close timed out')));
+        req.end();
+      });
+    } catch (err) {
+      if (this.debug) console.error(`[keeperhub debug] session close failed (harmless, best-effort): ${err.message}`);
+    }
   }
 
   isSessionExpiredError(err) {

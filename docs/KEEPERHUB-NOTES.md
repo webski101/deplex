@@ -123,7 +123,94 @@ Notes:
 - **Gas is sponsored.** The milestone REVOKE's raw execution result included `"sponsored":true` (`gasUsed:"46383"`, `effectiveGasPrice:"1134645244"`) — confirmed for `execute_contract_call`; not yet independently confirmed for `execute_transfer`, but no reason to expect it differs.
 - **Real status strings observed:** `EXECUTION_SUBMITTED` and terminal `EXECUTION_RESULT` both used `"completed"` for success. Our `SUCCESS_STATUSES`/`PENDING_STATUSES` sets in `keeperhub.mjs`/`responder.mjs` didn't include `"completed"` as a *pending* value (correct — no change needed), and `isSuccessStatus` already listed `"completed"` (correct, matched on the first real attempt). Still-unconfirmed: the exact failure-status vocabulary (we've only observed `"failed"` so far, from the pre-fix EVACUATE attempt).
 
+## Session accumulation investigation (2026-07-20) — two 20s `tools/call` timeouts in one night
+
+**What happened:** `attack/run-demo.mjs` timed out twice tonight, both after exactly
+`KEEPERHUB_REQUEST_TIMEOUT_MS` (20000ms), both on real authenticated `tools/call` requests
+(`plantApproval`'s `execute_contract_call`, `ensureWethBalance`'s balance-check leg) — on run #5+
+of the night, on top of prior sessions. A direct `curl` against KeeperHub's base endpoint in the
+same window returned HTTP/2 200 instantly with a clean TLS handshake, ruling out basic
+connectivity/DNS/network-path issues as the cause.
+
+**Point 1 — is there documented KeeperHub-side rate limiting?** Checked live, not assumed:
+re-fetched `https://docs.keeperhub.com/ai-tools/mcp-server` (2026-07-20) specifically for rate
+limiting, throttling, request quotas, session lifecycle/expiry, or session cleanup. **None of it
+is mentioned anywhere on the page.** The only session-adjacent text is OAuth token validity
+("1-hour access tokens, 30-day refresh tokens"), which doesn't apply here (this project uses the
+API-key auth path). Same conclusion as the "Gas sponsorship" entry above: **not documented**,
+which is not the same as **confirmed absent** — plenty of platforms throttle without publishing
+the policy, especially on a hackathon/dev-tier key. Unconfirmed either way from public docs; a
+real rate limiter would typically also be visible via `Retry-After`/`X-RateLimit-*` response
+headers even without prose documentation — worth capturing on the next call (see the debug-timing
+fix below, which now also has visibility into this via raw response headers if `DEPLEX_DEBUG_KEEPERHUB=1`
+logging is extended to include them, not yet done).
+
+**Point 2 — is our own client/retry logic contributing?** This is where a concrete, high-
+confidence finding turned up. Two sub-theories were checked and one confirmed:
+
+- *Stale session ID reused across many runs of one long-lived process:* ruled out.
+  `attack/run-demo.mjs` is a genuinely fresh `node` process per invocation (`process.exit()` at
+  the end of `main()`), and creates a `new KeeperHubClient(...)` with `sessionId: null` every
+  time — there is no in-process state to go stale *across* runs. (`src/watcher.mjs`'s own client
+  *is* long-lived by design, holding one session for its whole run — that's correct, not a bug,
+  as long as it's the only long-lived one.)
+- *Sessions accumulating server-side because this client never terminates them:* **confirmed as
+  a real, checkable gap.** Verified the MCP Streamable HTTP transport spec directly (not assumed
+  from memory): a client that's done with a session **SHOULD** send an HTTP `DELETE` with the
+  `Mcp-Session-Id` header so the server can free whatever it's tracking for that session; the
+  server **MAY** reply `405` if it doesn't support client-initiated termination. `src/keeperhub.mjs`
+  never sent this — not once, anywhere. Every one-shot script (`attack/run-demo.mjs`,
+  `scripts/dump-tools.mjs`, `scripts/investigate-wallet.mjs`, `scripts/plant-approval.mjs`) calls
+  `initialize` fresh on every invocation and then just exits, leaving that session open
+  server-side indefinitely. Across "run #5+ tonight alone, on top of prior sessions" (i.e. prior
+  nights of development too), that's plausibly dozens of never-closed sessions accumulated under
+  one API key by now. If KeeperHub's session bookkeeping is anything less than perfectly
+  efficient at scale (e.g. a linear scan or lookup that degrades with the number of sessions ever
+  opened for a key), this would manifest **exactly** as observed: a stateless/session-free health
+  check stays fast, while session-and-auth-dependent `tools/call` requests get slower over a long
+  night of repeated runs, eventually exceeding the timeout under load — without KeeperHub needing
+  any explicit rate-limiting logic at all for this to happen.
+- **This does not prove causation** — KeeperHub's actual session-storage implementation isn't
+  visible from here, the same honesty standard as the facilitator-nonce entry in
+  `FAILURE-MODES.md`. It's the most concrete, protocol-conformance-backed lead found, not a
+  confirmed root cause.
+
+**Fix applied regardless of whether it's the actual cause, because it's correct either way:**
+`KeeperHubClient.closeSession()` (`src/keeperhub.mjs`) sends the spec's `DELETE`, treats a `405`
+as success, clears `this.sessionId` locally, and never throws (best-effort — a cleanup failure
+must never mask the real result of whatever the caller was doing). Wired into all four one-shot
+scripts' cleanup paths via `try`/`finally`; `src/watcher.mjs`'s long-lived session is deliberately
+left open for its whole run, since closing-and-reopening on every call would be worse, not better.
+Also added: per-request latency logging under `DEPLEX_DEBUG_KEEPERHUB=1`, specifically because
+tonight's two timeouts left no data to distinguish "got progressively slower" from "was always
+capable of hanging this way" — a bare timeout error looks identical either way. If this recurs, run
+with that flag set and the log will show real per-call millisecond timings instead of two more
+data points shaped exactly like the first two.
+
+**Point 3 — should `KEEPERHUB_REQUEST_TIMEOUT_MS` be temporarily raised before the demo
+recording?** As a safety margin, yes, cautiously: raising it (e.g. `20000` → `35000`–`45000` via
+env var for tonight's runs only, not a permanent default change) costs nothing but a slightly
+longer worst-case wait, and gives a genuinely-slow-but-eventually-responding call room to
+complete instead of aborting right at the edge. But **a fixed timeout increase is not a fix** if
+session accumulation (or real rate limiting) is the actual cause — it only delays hitting the
+same wall, and if the underlying degradation scales with total sessions/calls made, a longer
+timeout on an already-degraded key just means waiting longer to fail. The actual mitigation for
+tonight specifically: run `attack/run-demo.mjs` fewer times than otherwise planned before the
+real recording (each run is one more session, even with `closeSession()` now cleaning up *future*
+runs — tonight's already-accumulated sessions aren't retroactively closed by this fix), and if a
+timeout does recur, capture the `DEPLEX_DEBUG_KEEPERHUB=1` timing output rather than just retrying
+blindly, so the next investigation has real numbers instead of starting from zero again.
+
 ## Open questions — still open
 
 - Whether gas sponsorship extends to `execute_transfer` the same way it's confirmed for `execute_contract_call`.
 - Full failure/edge-case status vocabulary beyond `"failed"`/`"completed"`.
+- Whether KeeperHub actually enforces per-API-key rate limiting or a concurrent-session cap —
+  unconfirmed from public docs either way (see the session-accumulation entry above). Capturing
+  response headers (`Retry-After`, `X-RateLimit-*`) on a future call would settle this faster than
+  more timeout data alone.
+- Whether tonight's two timeouts were actually caused by accumulated sessions, real throttling,
+  or something else entirely (e.g. transient load on KeeperHub's own infrastructure, unrelated to
+  anything this project does) — `closeSession()` is a correct fix regardless, but its effect on
+  *this specific* symptom is not yet independently confirmed, since the sessions already
+  accumulated tonight aren't retroactively cleaned up by a fix applied after the fact.

@@ -184,17 +184,28 @@ async function main() {
   console.log(`watched wallet: ${cfg.watchedWallet}`);
   console.log(`ATTACK_DELAY_MS: ${delayMs}${delayMs === 0 ? '  (deliberate loss test -- see file header)' : ''}`);
 
+  // One fresh MCP session per run, previously never closed -- across
+  // "run #5+ tonight alone, on top of prior sessions" that's a lot of open
+  // server-side state accumulated under one API key with zero cleanup. See
+  // docs/KEEPERHUB-NOTES.md's session-accumulation entry.
+  const client = new KeeperHubClient(cfg.keeperHub);
   let vectorResult;
-  if (useNftVector && isNftVectorAvailable(cfg)) {
-    console.log(`vector: NFT ApprovalForAll (every ${NFT_VECTOR_INTERVAL}th run)`);
-    vectorResult = await runNftVector(cfg, new KeeperHubClient(cfg.keeperHub), { delayMs });
-  } else {
-    if (useNftVector && !isNftVectorAvailable(cfg)) {
-      console.log(`vector: run #${runNumber} would use the NFT vector, but ATTACK_NFT_CONTRACT is not set -- falling back to ERC-20`);
+  try {
+    if (useNftVector && isNftVectorAvailable(cfg)) {
+      console.log(`vector: NFT ApprovalForAll (every ${NFT_VECTOR_INTERVAL}th run)`);
+      vectorResult = await runNftVector(cfg, client, { delayMs });
     } else {
-      console.log(`vector: ERC-20 unlimited approve()`);
+      if (useNftVector && !isNftVectorAvailable(cfg)) {
+        console.log(`vector: run #${runNumber} would use the NFT vector, but ATTACK_NFT_CONTRACT is not set -- falling back to ERC-20`);
+      } else {
+        console.log(`vector: ERC-20 unlimited approve()`);
+      }
+      vectorResult = await runErc20Vector(cfg, client, { delayMs });
     }
-    vectorResult = await runErc20Vector(cfg, new KeeperHubClient(cfg.keeperHub), { delayMs });
+  } finally {
+    // No more KeeperHub calls happen past this point in main() -- safe to
+    // close here rather than wrapping the whole function.
+    await client.closeSession();
   }
 
   const { drainResult, deplexResult, vector, tokenAddress, attackerAddress, demoWalletAddress, isNft } = vectorResult;
