@@ -1,0 +1,9 @@
+{
+  "date": "2026-07-21",
+  "font_stack": "system monospace stack in dashboard/style.css",
+  "palette": "dark green terminal custom properties",
+  "motion": "motion-cut; no animation library",
+  "spacing": "ad hoc pixel values; no prior named scale",
+  "framework": "vanilla HTML and ES modules; zero dependencies",
+  "preserved": ["zero-build architecture", "live/demo data flow", "dashboard behavior", "security content"]
+}

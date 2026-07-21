@@ -214,14 +214,20 @@ function renderIncidentList(records) {
   const listEl = $('incident-list');
   listEl.innerHTML = '';
   for (const [incidentId, incRecords] of entries) {
-    const item = document.createElement('div');
+    const item = document.createElement('button');
+    item.type = 'button';
     item.className = 'incident-item';
+    item.setAttribute('aria-pressed', 'false');
     const featured = FEATURED_INCIDENTS[incidentId];
     const lastState = incRecords[incRecords.length - 1].payload.nextState ?? incRecords[incRecords.length - 1].payload.stateName ?? '';
-    item.innerHTML = `${featured ? `<div class="incident-featured">★ ${escapeHtml(featured)}</div>` : ''}<div class="incident-id">${incidentId}</div><div class="small dim">${incRecords.length} record(s)${lastState ? ' · ' + lastState : ''}</div>`;
+    item.innerHTML = `${featured ? `<div class="incident-featured">Verified run · ${escapeHtml(featured)}</div>` : ''}<div class="incident-id">${incidentId}</div><div class="small dim">${incRecords.length} record(s)${lastState ? ' · ' + lastState : ''}</div>`;
     item.addEventListener('click', () => {
-      for (const el of listEl.querySelectorAll('.incident-item')) el.classList.remove('selected');
+      for (const el of listEl.querySelectorAll('.incident-item')) {
+        el.classList.remove('selected');
+        el.setAttribute('aria-pressed', 'false');
+      }
       item.classList.add('selected');
+      item.setAttribute('aria-pressed', 'true');
       renderIncidentTrail(incRecords);
     });
     listEl.appendChild(item);
@@ -242,22 +248,49 @@ let tamperedRecords = null;
 async function runVerify(records, label) {
   const resultEl = $('verify-result');
   const metaEl = $('verify-meta');
+  const verifyButton = $('btn-verify');
+  const originalLabel = verifyButton.textContent;
+
+  verifyButton.dataset.state = 'loading';
+  verifyButton.disabled = true;
+  verifyButton.setAttribute('aria-disabled', 'true');
+  verifyButton.setAttribute('aria-busy', 'true');
+  verifyButton.textContent = 'Verifying';
   resultEl.className = 'verify-result verify-running';
-  resultEl.textContent = `VERIFYING ${records.length} RECORDS...`;
+  resultEl.textContent = `Verifying ${records.length} records…`;
   metaEl.textContent = '';
 
-  const startedAt = performance.now();
-  const result = await verifyChain(records, webCryptoDigestHex);
-  const elapsedMs = (performance.now() - startedAt).toFixed(1);
+  try {
+    const startedAt = performance.now();
+    const result = await verifyChain(records, webCryptoDigestHex);
+    const elapsedMs = (performance.now() - startedAt).toFixed(1);
 
-  if (result.valid) {
-    resultEl.className = 'verify-result verify-valid';
-    resultEl.textContent = `✓ CHAIN VALID -- ${records.length} records, genesis to head, zero breaks`;
-  } else {
+    if (result.valid) {
+      resultEl.className = 'verify-result verify-valid';
+      resultEl.textContent = `✓ Chain valid — ${records.length} records, genesis to head, zero breaks`;
+      verifyButton.dataset.state = 'success';
+      verifyButton.textContent = 'Verified';
+    } else {
+      resultEl.className = 'verify-result verify-broken';
+      resultEl.textContent = `✕ Chain broken at record #${result.brokenAt}: ${result.reason}`;
+      verifyButton.dataset.state = 'error';
+      verifyButton.textContent = 'Break detected';
+    }
+    metaEl.textContent = `${label} · verified with WebCrypto in ${elapsedMs} ms`;
+  } catch (error) {
     resultEl.className = 'verify-result verify-broken';
-    resultEl.textContent = `✗ CHAIN BROKEN at record #${result.brokenAt}: ${result.reason}`;
+    resultEl.textContent = `Verification failed: ${error.message}`;
+    verifyButton.dataset.state = 'error';
+    verifyButton.textContent = 'Try again';
+  } finally {
+    verifyButton.disabled = false;
+    verifyButton.setAttribute('aria-disabled', 'false');
+    verifyButton.removeAttribute('aria-busy');
+    window.setTimeout(() => {
+      delete verifyButton.dataset.state;
+      verifyButton.textContent = originalLabel;
+    }, 1800);
   }
-  metaEl.textContent = `${label} · verified via crypto.subtle (WebCrypto) in ${elapsedMs}ms`;
 }
 
 function wireVerifyButtons() {
@@ -277,12 +310,14 @@ function wireVerifyButtons() {
     else victim.payload._tampered = true;
 
     $('btn-untamper').disabled = false;
+    $('btn-untamper').setAttribute('aria-disabled', 'false');
     runVerify(tamperedRecords, `tampered copy (record #${victimIdx} mutated)`);
   });
 
   $('btn-untamper').addEventListener('click', () => {
     tamperedRecords = null;
     $('btn-untamper').disabled = true;
+    $('btn-untamper').setAttribute('aria-disabled', 'true');
     runVerify(currentRecords, 'full chain (restored)');
   });
 }
@@ -300,10 +335,10 @@ function renderPolicy(policyText) {
   summary.innerHTML = '';
 
   const statusLine = document.createElement('div');
-  statusLine.className = 'small';
+  statusLine.className = errors.length ? 'policy-status policy-status-error' : 'policy-status';
   statusLine.innerHTML = errors.length
-    ? `<span style="color:var(--red)">✗ ${errors.length} compile error(s)</span>`
-    : `<span style="color:var(--green-bright)">✓ compiled clean -- ${rules.length} rule(s), zero errors</span>`;
+    ? `<span>✕ ${errors.length} compile error(s)</span>`
+    : `<span>✓ Compiled clean — ${rules.length} rule(s), zero errors</span>`;
   summary.appendChild(statusLine);
 
   for (const rule of rules) {
@@ -315,7 +350,7 @@ function renderPolicy(policyText) {
   for (const err of errors) {
     const div = document.createElement('div');
     div.className = 'policy-rule';
-    div.innerHTML = `<div style="color:var(--red)">line ${err.line}: ${escapeHtml(err.message)}</div>`;
+    div.innerHTML = `<div class="policy-error">line ${err.line}: ${escapeHtml(err.message)}</div>`;
     summary.appendChild(div);
   }
 }
