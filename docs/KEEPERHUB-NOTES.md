@@ -201,6 +201,72 @@ runs — tonight's already-accumulated sessions aren't retroactively closed by t
 timeout does recur, capture the `DEPLEX_DEBUG_KEEPERHUB=1` timing output rather than just retrying
 blindly, so the next investigation has real numbers instead of starting from zero again.
 
+### Recurrence, same night — two more 20s timeouts, on `execute_transfer` this time (still open)
+
+After the `closeSession()` fix was built and deployed, `tools/call` timed out at exactly
+`KEEPERHUB_REQUEST_TIMEOUT_MS` (20000ms) **twice more**, back to back, on `attack/drainer.mjs`'s
+`ensureAttackerGas()` step (`execute_transfer`, funding the throwaway attacker's gas) — no other
+errors in between either occurrence. Same symptom as the original entry above (a
+previously-confirmed-fast basic reachability check rules out plain connectivity), but on a
+different tool (`execute_transfer` vs. the original `execute_contract_call`/balance-check calls),
+which is a real, specific new data point: it argues against "one specific call shape is slow" and
+toward something broader — either KeeperHub-side degradation under this key's cumulative call
+volume today (not just accumulated sessions specifically, since the fix for that was already live
+when this recurred), or genuine rate limiting that isn't tied to any one tool.
+
+**Deliberately not re-investigated tonight** — this needs a fresh session, not a tired guess.
+Flagging as a known open item, with the concrete pre-recording decision it forces:
+
+- **If it's still happening when the next session starts:** don't spend the actual demo recording
+  attempt discovering this live. Either (a) route the recording around
+  `ensureAttackerGas()`/`execute_transfer` specifically if a prior run already left the attacker
+  address funded (check its balance first — `ensureAttackerGas()` already skips funding if the
+  balance is sufficient, so a pre-funded throwaway address sidesteps the slow call entirely), or
+  (b) set `KEEPERHUB_REQUEST_TIMEOUT_MS` higher (e.g. `35000`–`45000`) as a safety margin for that
+  one run — same caveat as before: this buys headroom for a genuinely slow-but-responding call, it
+  does not fix whatever the underlying cause turns out to be.
+- **First thing to check next session:** capture `DEPLEX_DEBUG_KEEPERHUB=1` timing output on the
+  next `execute_transfer` call (any call, not just during a failure) to get a real latency
+  baseline — right now there's still no data point for "how long does a *healthy* `execute_transfer`
+  actually take," only failures at exactly the timeout boundary, which makes it hard to tell slow
+  from genuinely hung.
+
+### Refined finding (2026-07-20, `DEPLEX_DEBUG_KEEPERHUB=1` baseline) — the slowness is isolated to action-submitting calls, not the connection/session layer
+
+Captured real per-call timings on the handshake and read path:
+
+| Call | Timing | Kind |
+|---|---|---|
+| `initialize` | 252ms | session setup |
+| `notifications/initialized` | 82ms | session setup |
+| `tools/list` | 47ms | read-only |
+
+All fast, all healthy — this **rules out the connection, the session handshake, and the API key
+itself** as the source. Combined with the fact that *every* timeout tonight (now four total, across
+two sessions) landed specifically on `execute_transfer` and never once on a read-only or setup
+call, the pattern is consistent, not random: **the slowness/timeout is isolated to the
+action-submitting (on-chain-write) calls — `execute_transfer`, and by strong inference
+`execute_contract_call` too — not to KeeperHub connectivity in general.**
+
+This is a meaningful narrowing. An execution call does substantially more server-side work than a
+read: KeeperHub has to build, sign (via its Turnkey-backed wallet integration), broadcast, and
+often wait on the transaction before responding — any of which can legitimately take longer than a
+20s client timeout under network/gas conditions a `tools/list` never touches. So the leading
+explanation shifts again: less "the API key is being throttled" (a throttle would tend to hit reads
+too) and more "the synchronous execution round-trip itself sometimes exceeds 20s," which is a
+**client-side timeout-too-tight problem as much as a KeeperHub-side latency one**. Notably, every
+funds-moving execution actually *observed to fail* tonight was on the write path, and yet the panic
+evacuation and the earlier REVOKE both *did* eventually complete — consistent with "the work
+succeeds server-side, but sometimes slower than the client is willing to wait," not "the call is
+truly hung."
+
+**Still not proven** (needs a healthy-`execute_transfer` timing capture to confirm, see below), but
+this is now the most-supported reading, and it points at a low-risk mitigation that's more than a
+band-aid: a **higher `KEEPERHUB_REQUEST_TIMEOUT_MS` specifically because execution is legitimately
+slower than reads**, not merely as a margin against an unknown. Worth considering a permanently
+higher default for the execution calls specifically, separate from read calls, if a baseline
+confirms healthy execution regularly runs into the high-teens of seconds.
+
 ## Open questions — still open
 
 - Whether gas sponsorship extends to `execute_transfer` the same way it's confirmed for `execute_contract_call`.
@@ -209,8 +275,14 @@ blindly, so the next investigation has real numbers instead of starting from zer
   unconfirmed from public docs either way (see the session-accumulation entry above). Capturing
   response headers (`Retry-After`, `X-RateLimit-*`) on a future call would settle this faster than
   more timeout data alone.
-- Whether tonight's two timeouts were actually caused by accumulated sessions, real throttling,
-  or something else entirely (e.g. transient load on KeeperHub's own infrastructure, unrelated to
-  anything this project does) — `closeSession()` is a correct fix regardless, but its effect on
-  *this specific* symptom is not yet independently confirmed, since the sessions already
-  accumulated tonight aren't retroactively cleaned up by a fix applied after the fact.
+- What causes the execution-call timeouts. The theory has narrowed twice: from "accumulated
+  sessions" (weakened when it recurred after `closeSession()` was live) to "rate-limiting by call
+  volume" to — most recently, and most supported — **"execution calls (`execute_transfer`/
+  `execute_contract_call`) are just legitimately slower than reads, sometimes past the 20s client
+  timeout"** (the handshake/read baseline is fast, only writes time out). `closeSession()` remains a
+  correct fix regardless; it just probably wasn't the fix for *this* symptom. Still unproven without
+  a healthy-`execute_transfer` timing capture.
+- **Open, pre-demo-recording, time-sensitive:** is this still happening as of the next session? If
+  yes, a routing/timeout decision (above) needs to be made before attempting the real recording,
+  not discovered during it. The refined finding makes a **higher execution-call timeout** the
+  leading candidate — cheap, and now theory-backed rather than a blind margin.
