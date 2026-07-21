@@ -267,6 +267,34 @@ slower than reads**, not merely as a margin against an unknown. Worth considerin
 higher default for the execution calls specifically, separate from read calls, if a baseline
 confirms healthy execution regularly runs into the high-teens of seconds.
 
+### RESOLVED (2026-07-20/21) — confirmed via `scripts/time-execute-transfer.mjs`: a healthy `execute_transfer` submit takes 18985ms
+
+Ran the dedicated timing diagnostic (`scripts/time-execute-transfer.mjs`, which deliberately raises
+the request timeout to 90s so a slow-but-healthy call has room to actually finish instead of
+aborting at the exact boundary being measured) against a real, negligible native transfer. Result:
+**submit call = 18985ms, succeeded.** Every "timeout" observed over two nights (four total, all on
+`execute_transfer`/`execute_contract_call`, never on a read) happened at almost exactly this value
+— the old 20000ms default gave essentially zero margin above a legitimately-slow-but-healthy
+execution call, so the timeouts were the client giving up a few hundred milliseconds early on work
+that was actually succeeding server-side, not KeeperHub hanging or throttling anything.
+
+**Verdict, stated plainly: not a KeeperHub bug, not rate limiting, not session accumulation
+(`closeSession()` remains a correct fix for the real gap it addressed, just not the cause of this
+specific symptom).** Execution calls (submit/build/sign/broadcast via KeeperHub's Turnkey-backed
+wallet integration) are structurally slower than reads or session-handshake calls, and 20s wasn't
+enough headroom above the real, measured value.
+
+**Fix:** `KEEPERHUB_REQUEST_TIMEOUT_MS`'s default raised from `20000` to `45000` in
+`src/config.mjs` — comfortable margin above the measured 18985ms, without being so large that a
+genuinely hung call takes ages to surface. `KEEPERHUB_POLL_TIMEOUT_MS` (120000, governs the
+separate poll-until-terminal-status loop after a call is submitted) was already generous and
+untouched. `test/keeperhub.test.mjs`'s hang-detection test still passes unchanged — it constructs
+its own explicit short `requestTimeoutMs` per test rather than relying on the default, so it isn't
+affected by the default changing.
+
+This closes out the open item from the "recurrence" entry above: `attack/run-demo.mjs` should now
+run `ensureAttackerGas()`/`ensureWethBalance()` without hitting this specific timeout.
+
 ## Open questions — still open
 
 - Whether gas sponsorship extends to `execute_transfer` the same way it's confirmed for `execute_contract_call`.

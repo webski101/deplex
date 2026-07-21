@@ -128,8 +128,15 @@ export function loadConfig(env = process.env) {
       pollIntervalMs: parseIntEnv(env.KEEPERHUB_POLL_MS, 3000),
       pollTimeoutMs: parseIntEnv(env.KEEPERHUB_POLL_TIMEOUT_MS, 120000),
       // Per-HTTP-request cap, distinct from pollTimeoutMs (which bounds the
-      // whole poll-until-terminal-status loop across many requests).
-      requestTimeoutMs: parseIntEnv(env.KEEPERHUB_REQUEST_TIMEOUT_MS, 20000),
+      // whole poll-until-terminal-status loop across many requests). 20000
+      // was the original default but proved too tight for the SUBMIT call
+      // of an execution (execute_transfer/execute_contract_call), which
+      // does substantially more server-side work than a read -- measured
+      // live at 18985ms for a healthy call (see docs/KEEPERHUB-NOTES.md),
+      // right at the edge of the old default and the cause of every
+      // "timeout" observed, none of which were an actual hang. Raised to
+      // give real headroom above that measured value.
+      requestTimeoutMs: parseIntEnv(env.KEEPERHUB_REQUEST_TIMEOUT_MS, 45000),
     },
   };
 }
